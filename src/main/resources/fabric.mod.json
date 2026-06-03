@@ -1,0 +1,33 @@
+{
+	"schemaVersion": 1,
+	"id": "slimestone",
+	"version": "${version}",
+	"name": "Slimestone",
+	"description": "Piston retraction chain simulator — validates chains off-thread and highlights failures in-world.",
+	"authors": [
+		"pingu"
+	],
+	"license": "CC0-1.0",
+	"icon": "assets/slimestone/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.pingu.Slimestone"
+		],
+		"client": [
+			"com.pingu.SlimestoneClient"
+		],
+		"fabric-datagen": [
+			"com.pingu.SlimestoneDataGenerator"
+		]
+	},
+	"mixins": [
+		"slimestone.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.2",
+		"minecraft": "~1.21.5",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}
