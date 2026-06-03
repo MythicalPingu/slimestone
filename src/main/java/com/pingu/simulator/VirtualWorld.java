@@ -16,7 +16,6 @@ public class VirtualWorld {
 
     private final Map<BlockPos, BlockState> blocks = new HashMap<>();
 
-    // NEW: LinkedHashMap preserves the exact order moving blocks are created (Arrival Order)
     private final LinkedHashMap<BlockPos, VirtualMovingBlock> movingBlocks = new LinkedHashMap<>();
 
     private final int minY;
@@ -36,7 +35,14 @@ public class VirtualWorld {
     }
 
     public BlockState getBlockState(BlockPos pos) {
-        return blocks.getOrDefault(pos, Blocks.AIR.defaultBlockState());
+        BlockState state = blocks.getOrDefault(pos, Blocks.AIR.defaultBlockState());
+
+        // Treat piston heads as air for simulation testing purposes
+        if (state.is(Blocks.PISTON_HEAD)) {
+            return Blocks.AIR.defaultBlockState();
+        }
+
+        return state;
     }
 
     public void setBlock(BlockPos pos, BlockState state) {
@@ -47,11 +53,9 @@ public class VirtualWorld {
         blocks.put(pos.immutable(), Blocks.AIR.defaultBlockState());
     }
 
-    // --- NEW: Moving Block Phase Logic ---
-
     public static class VirtualMovingBlock {
         public final BlockState state;
-        public int timer = 2; // Ticks down to 0
+        public int timer = 2;
         public VirtualMovingBlock(BlockState state) { this.state = state; }
     }
 
@@ -63,36 +67,30 @@ public class VirtualWorld {
         return !movingBlocks.isEmpty();
     }
 
-    /**
-     * Decrements moving block timers. If a block hits 0, it solidifies.
-     * @return A list of positions that solidified this tick, strictly in arrival order.
-     */
-    public List<BlockPos> tickMovingBlocks() {
-        List<BlockPos> solidified = new ArrayList<>();
-        Iterator<Map.Entry<BlockPos, VirtualMovingBlock>> iterator = movingBlocks.entrySet().iterator();
-
-        while (iterator.hasNext()) {
-            Map.Entry<BlockPos, VirtualMovingBlock> entry = iterator.next();
-            VirtualMovingBlock mb = entry.getValue();
-
-            mb.timer--;
-
-            if (mb.timer <= 0) {
-                // Solidify into the world
-                setBlock(entry.getKey(), mb.state);
-                solidified.add(entry.getKey());
-                iterator.remove();
+    public List<BlockPos> tickMovingBlockTimers() {
+        List<BlockPos> ready = new ArrayList<>();
+        for (Map.Entry<BlockPos, VirtualMovingBlock> entry : movingBlocks.entrySet()) {
+            entry.getValue().timer--;
+            if (entry.getValue().timer <= 0) {
+                ready.add(entry.getKey());
             }
         }
-        return solidified;
+        return ready;
     }
 
-    // -------------------------------------
+    /**
+     * Solidifies a single moving block, taking it out of stasis and placing it in the world.
+     */
+    public void solidifyMovingBlock(BlockPos pos) {
+        VirtualMovingBlock mb = movingBlocks.remove(pos);
+        if (mb != null) {
+            setBlock(pos, mb.state);
+        }
+    }
 
     public boolean isPushable(BlockPos pos, Direction pushDir, boolean canDestroy, Direction pistonFacing) {
         if (pos.getY() < minY || pos.getY() > maxY - 1) return false;
 
-        // NEW: Moving blocks act as immovable at their destination
         if (movingBlocks.containsKey(pos)) return false;
 
         BlockState state = getBlockState(pos);

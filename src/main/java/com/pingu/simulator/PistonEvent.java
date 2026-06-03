@@ -9,7 +9,7 @@ import java.util.List;
 public class PistonEvent {
 
     public enum Result {
-        SUCCESS_PULLED, SUCCESS_NO_PULL, FAILED_BLOCKED
+        SUCCESS_PULLED, SUCCESS_NO_PULL, SUCCESS_PUSHED, FAILED_BLOCKED
     }
 
     private final int gameTick;
@@ -43,6 +43,6 @@ public class PistonEvent {
     public List<String> getChanges() { return changes; }
 
     public boolean isSuccess() {
-        return result == Result.SUCCESS_PULLED || result == Result.SUCCESS_NO_PULL;
+        return result == Result.SUCCESS_PULLED || result == Result.SUCCESS_NO_PULL || result == Result.SUCCESS_PUSHED;
     }
 }

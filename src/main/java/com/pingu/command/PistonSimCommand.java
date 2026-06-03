@@ -173,8 +173,8 @@ public class PistonSimCommand {
             SimResultPacket.Result r = switch (event.getResult()) {
                 case SUCCESS_PULLED        -> SimResultPacket.Result.SUCCESS_PULLED;
                 case SUCCESS_NO_PULL       -> SimResultPacket.Result.SUCCESS_NO_PULL;
+                case SUCCESS_PUSHED        -> SimResultPacket.Result.SUCCESS_PUSHED;
                 case FAILED_BLOCKED        -> SimResultPacket.Result.FAILED_BLOCKED;
-
             };
             entries.add(new SimResultPacket.EventEntry(event.getPistonPos(), event.getFacing(), r, event.getGameTick(), event.getChanges()));
         }
@@ -192,8 +192,8 @@ public class PistonSimCommand {
             String prefix = switch (event.getResult()) {
                 case SUCCESS_PULLED        -> "§a✓ [PULL] ";
                 case SUCCESS_NO_PULL       -> "§a✓ [RETRACT] ";
+                case SUCCESS_PUSHED        -> "§a✓ [PUSH] ";
                 case FAILED_BLOCKED        -> "§c✗ [BLOCKED] ";
-
             };
             String title = prefix + "§fPiston at " + formatPos(event.getPistonPos()) + " §7(gt" + event.getGameTick() + ")";
 
