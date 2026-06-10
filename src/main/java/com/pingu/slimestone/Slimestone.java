@@ -219,7 +219,7 @@ public class Slimestone implements ModInitializer {
                 setBlockRaw(pos, state.setValue(PistonBaseBlock.EXTENDED, true));
                 log("Set block at " + pos.toShortString() + " to "
                         + (extendIsSticky ? "Sticky Piston Headless Base" : "Piston Headless Base"));
-                log("Firing neighbor updates for piston base at: " + pos.toShortString());
+                //log("Firing neighbor updates for piston base at: " + pos.toShortString());
                 updateNeighborsAt(pos);
 
             } else if (type == 1) {
@@ -249,11 +249,11 @@ public class Slimestone implements ModInitializer {
 
                 setBlockRaw(pos, movingBaseState);
                 blockEntities.put(pos, new SimPistonMovingEntity(pos, unextendedBase, facing, false, true));
-                log("Created MovingPiston BE at " + pos.toShortString() + " for Retracting "
-                        + (isSticky ? "Sticky " : "") + "Base");
+                //log("Created MovingPiston BE at " + pos.toShortString() + " for Retracting "
+                //        + (isSticky ? "Sticky " : "") + "Base");
 
                 // 3. Immediately fire neighbor updates at the base position (vanilla: blockUpdated)
-                log("Firing neighbor updates for retracting base at: " + pos.toShortString());
+                //log("Firing neighbor updates for retracting base at: " + pos.toShortString());
                 updateNeighborsAt(pos);
 
                 // 4. Handle the head slot and optional block pulling
@@ -329,7 +329,7 @@ public class Slimestone implements ModInitializer {
                 blockEntities.put(newPos, be);
 
                 setBlockRaw(newPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
-                log("Created MovingPiston BE at " + newPos.toShortString() + " carrying " + movingState.getBlock().getName().getString());
+                //log("Created MovingPiston BE at " + newPos.toShortString() + " carrying " + movingState.getBlock().getName().getString());
             }
 
             if (extending) {
@@ -342,7 +342,7 @@ public class Slimestone implements ModInitializer {
                 SimPistonMovingEntity headBE = new SimPistonMovingEntity(headPos, headState, dir, true, true);
                 blockEntities.put(headPos, headBE);
                 setBlockRaw(headPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
-                log("Created MovingPiston BE at " + headPos.toShortString() + " carrying PISTON_HEAD");
+                //log("Created MovingPiston BE at " + headPos.toShortString() + " carrying PISTON_HEAD");
             }
 
             for (BlockPos p : vacatedSpots.keySet()) {
@@ -350,11 +350,11 @@ public class Slimestone implements ModInitializer {
             }
 
             for (int i = toPush.size() - 1; i >= 0; i--) {
-                log("Firing neighbor updates for vacated pushed pos: " + toPush.get(i).toShortString());
+                //log("Firing neighbor updates for vacated pushed pos: " + toPush.get(i).toShortString());
                 updateNeighborsAt(toPush.get(i));
             }
             if (extending) {
-                log("Firing neighbor updates for moving piston head starting pos: " + headPos.toShortString());
+                //log("Firing neighbor updates for moving piston head starting pos: " + headPos.toShortString());
                 updateNeighborsAt(headPos);
             }
         }
@@ -367,8 +367,8 @@ public class Slimestone implements ModInitializer {
             boolean wasAir = getBlockState(headPos).isAir();
             setBlockRaw(headPos, Blocks.AIR.defaultBlockState());
             if (!wasAir) {
-                log("Set " + headPos.toShortString() + " to Air (cleared head)");
-                log("Firing neighbor updates for cleared head at: " + headPos.toShortString());
+                //log("Set " + headPos.toShortString() + " to Air (cleared head)");
+                //log("Firing neighbor updates for cleared head at: " + headPos.toShortString());
                 updateNeighborsAt(headPos);
             }
         }
@@ -419,7 +419,7 @@ public class Slimestone implements ModInitializer {
 
         public void tick(VirtualLevel level) {
             progress += 0.5f;
-            level.log("Moving block at " + pos.toShortString() + " progressing: " + progress);
+            //level.log("Moving block at " + pos.toShortString() + " progressing: " + progress);
 
             if (progress >= 1.0f) {
                 finalTick(level);
@@ -431,8 +431,14 @@ public class Slimestone implements ModInitializer {
             level.setBlock(pos, movedState);
             level.log("Block arrived: " + movedState.getBlock().getName().getString() + " at " + pos.toShortString());
 
+            // NEW: Self-update for arriving pistons before broadcasting to neighbors
+            if (movedState.getBlock() instanceof PistonBaseBlock) {
+                level.log("Evaluating power state for newly arrived piston at: " + pos.toShortString());
+                level.checkIfExtend(pos, movedState);
+            }
+
             // Log and fire neighbor updates mirroring vanilla `tick()` placing the block
-            level.log("Firing neighbor updates for arrived block at: " + pos.toShortString());
+            //level.log("Firing neighbor updates for arrived block at: " + pos.toShortString());
             level.updateNeighborsAt(pos);
         }
     }
@@ -505,7 +511,7 @@ public class Slimestone implements ModInitializer {
             while (isSticky(state)) {
                 BlockPos next = pos.relative(pushDirection.getOpposite(), count);
                 BlockState nextState = level.getBlockState(next);
-                if (nextState.isAir() || !canStickToEachOther(state, nextState) || pos.equals(pistonPos)) break;
+                if (nextState.isAir() || !canStickToEachOther(state, nextState) || next.equals(pistonPos)) break;
                 state = nextState;
                 count++;
                 if (count + toPush.size() > 12) {
