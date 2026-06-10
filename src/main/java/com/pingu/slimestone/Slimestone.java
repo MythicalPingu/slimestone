@@ -115,9 +115,16 @@ public class Slimestone implements ModInitializer {
                 currentPhase = "BLOCK EVENTS";
                 while (!blockEvents.isEmpty()) {
                     active = true;
-                    BlockEvent event = blockEvents.poll();
+
+                    // 1. PEEK: Read the event but keep it in the queue so the deduplicator sees it
+                    BlockEvent event = blockEvents.peek();
+
+                    // 2. Execute the event and all resulting neighbor updates
                     triggerPistonEvent(event.pos, event.state, event.type, event.dir);
                     flushNeighborUpdates();
+
+                    // 3. POLL: Now that execution and updates are done, safely remove it
+                    blockEvents.poll();
                 }
 
                 if (!active && blockEvents.isEmpty() && neighborUpdates.isEmpty()) {
@@ -167,71 +174,95 @@ public class Slimestone implements ModInitializer {
             }
         }
 
-        public boolean hasRedstoneBlockPower(BlockPos pos) {
-            // Standard adjacent checks
+        public boolean hasRedstoneBlockPower(BlockPos pos, Direction pistonFacing) {
+            // Standard adjacent checks (Excluding the front face)
             for (Direction dir : Direction.values()) {
+                if (dir == pistonFacing) continue;
                 if (getBlockState(pos.relative(dir)).is(Blocks.REDSTONE_BLOCK)) return true;
             }
 
-            // Quasi-connectivity: 2 above, and +1 in each horizontal direction from the block above
+            // Quasi-connectivity (Checking the block above, excluding DOWN)
             BlockPos above = pos.above();
-            if (getBlockState(above.above()).is(Blocks.REDSTONE_BLOCK)) return true; // 2 above
-            if (getBlockState(above.north()).is(Blocks.REDSTONE_BLOCK)) return true; // +1 North
-            if (getBlockState(above.south()).is(Blocks.REDSTONE_BLOCK)) return true; // +1 South
-            if (getBlockState(above.east()).is(Blocks.REDSTONE_BLOCK)) return true;  // +1 East
-            if (getBlockState(above.west()).is(Blocks.REDSTONE_BLOCK)) return true;  // +1 West
+            for (Direction dir : Direction.values()) {
+                if (dir == Direction.DOWN) continue;
+                if (getBlockState(above.relative(dir)).is(Blocks.REDSTONE_BLOCK)) return true;
+            }
 
             return false;
         }
 
         public void checkIfExtend(BlockPos pos, BlockState state) {
-            boolean powered = hasRedstoneBlockPower(pos);
-            boolean extended = state.getValue(PistonBaseBlock.EXTENDED);
             Direction facing = state.getValue(PistonBaseBlock.FACING);
+            boolean powered = hasRedstoneBlockPower(pos, facing);
+            boolean extended = state.getValue(PistonBaseBlock.EXTENDED);
 
             if (powered && !extended) {
-                // 1. Instantiate and VALIDATE before queuing
                 SimPistonResolver resolver = new SimPistonResolver(this, pos, facing, true);
                 if (resolver.resolve()) {
                     log("Piston powered and path valid at " + pos.toShortString() + ". Queuing Extend.");
-                    blockEvents.add(new BlockEvent(pos, state, 0, facing));
-                } else {
-                    log("§cExtend blocked: Path invalid at " + pos.toShortString());
+                    BlockEvent event = new BlockEvent(pos, state, 0, facing);
+                    if (!blockEvents.contains(event)) blockEvents.add(event); // Deduplicate
                 }
             } else if (!powered && extended) {
-                log("Piston unpowered at " + pos.toShortString() + ". Queuing Contract Event (1).");
-                blockEvents.add(new BlockEvent(pos, state, 1, facing));
+                log("Piston unpowered at " + pos.toShortString() + ". Queuing Contract Event.");
+                BlockEvent event = new BlockEvent(pos, state, 1, facing);
+                if (!blockEvents.contains(event)) blockEvents.add(event); // Deduplicate
             }
         }
 
-        private void triggerPistonEvent(BlockPos pos, BlockState state, int type, Direction facing) {
+        private void triggerPistonEvent(BlockPos pos, BlockState queuedState, int type, Direction queuedFacing) {
+            // 1. Fetch the CURRENT state at the event position
+            BlockState currentState = getBlockState(pos);
+
+            // 2. Validate the block is still the exact same piston variant
+            // In vanilla, the block event holds a reference to the Block type, and checks it upon execution.
+            if (!currentState.is(queuedState.getBlock())) {
+                log("§eEvent cancelled: Block at " + pos.toShortString() + " is no longer the correct piston variant.");
+                return;
+            }
+
+            // 3. Extract properties from the CURRENT state (direction doesn't matter for validation, just execution)
+            Direction facing = currentState.getValue(PistonBaseBlock.FACING);
+            boolean isPowered = hasRedstoneBlockPower(pos, facing);
             if (type == 0) {
                 // EXTEND
+                // VANILLA PARITY: Cancel extend if the piston lost power before the event fired
+                if (!isPowered) {
+                    log("§eExtend cancelled: piston lost power before processing at " + pos.toShortString());
+                    return;
+                }
+
                 SimPistonResolver resolver = new SimPistonResolver(this, pos, facing, true);
                 if (!resolver.resolve()) {
-                    // Print the detailed error
                     log("§cExtend failed: " + resolver.getFailureReason() + " (Pos: " +
                             (resolver.getFailurePos() != null ? resolver.getFailurePos().toShortString() : "N/A") + ")");
                     return;
                 }
-                moveBlocks(pos, state, facing, true, resolver);
-                boolean extendIsSticky = state.getBlock() == Blocks.STICKY_PISTON;
-                setBlockRaw(pos, state.setValue(PistonBaseBlock.EXTENDED, true));
+
+                // Use currentState here!
+                moveBlocks(pos, currentState, facing, true, resolver);
+                boolean extendIsSticky = currentState.getBlock() == Blocks.STICKY_PISTON;
+                setBlockRaw(pos, currentState.setValue(PistonBaseBlock.EXTENDED, true));
+
                 log("Set block at " + pos.toShortString() + " to "
                         + (extendIsSticky ? "Sticky Piston Headless Base" : "Piston Headless Base"));
-                //log("Firing neighbor updates for piston base at: " + pos.toShortString());
+                log("Firing neighbor updates for piston base at: " + pos.toShortString());
                 updateNeighborsAt(pos);
 
             } else if (type == 1) {
                 // RETRACT
-                // Cancel if the piston re-gained power before this event fires
-                if (hasRedstoneBlockPower(pos)) {
+                // VANILLA PARITY: Cancel retract if piston regained power, and force it back to extended
+                if (isPowered) {
                     log("§eRetract cancelled: piston re-gained power at " + pos.toShortString());
+                    // Vanilla explicitly sets it to extended just in case
+                    setBlockRaw(pos, currentState.setValue(PistonBaseBlock.EXTENDED, true));
                     return;
                 }
 
-                boolean isSticky = state.getBlock() == Blocks.STICKY_PISTON;
+                // Use currentState here!
+                boolean isSticky = currentState.getBlock() == Blocks.STICKY_PISTON;
                 BlockPos headPos = pos.relative(facing);
+                setBlockRaw(headPos, Blocks.AIR.defaultBlockState());
 
                 // 1. If the head slot still holds a moving piston BE, instantly resolve it first
                 SimPistonMovingEntity headBE = blockEntities.get(headPos);
@@ -245,24 +276,24 @@ public class Slimestone implements ModInitializer {
                 BlockState movingBaseState = Blocks.MOVING_PISTON.defaultBlockState()
                         .setValue(BlockStateProperties.FACING, facing)
                         .setValue(PistonHeadBlock.TYPE, pType);
-                BlockState unextendedBase = state.setValue(PistonBaseBlock.EXTENDED, false);
+                BlockState unextendedBase = currentState.setValue(PistonBaseBlock.EXTENDED, false);
 
                 setBlockRaw(pos, movingBaseState);
                 blockEntities.put(pos, new SimPistonMovingEntity(pos, unextendedBase, facing, false, true));
-                //log("Created MovingPiston BE at " + pos.toShortString() + " for Retracting "
-                //        + (isSticky ? "Sticky " : "") + "Base");
+                log("Created MovingPiston BE at " + pos.toShortString() + " for Retracting "
+                        + (isSticky ? "Sticky " : "") + "Base");
 
                 // 3. Immediately fire neighbor updates at the base position (vanilla: blockUpdated)
-                //log("Firing neighbor updates for retracting base at: " + pos.toShortString());
+                log("Firing neighbor updates for retracting base at: " + pos.toShortString());
                 updateNeighborsAt(pos);
 
                 // 4. Handle the head slot and optional block pulling
                 if (isSticky) {
                     BlockPos twoAheadPos = pos.relative(facing, 2);
-
-                    // If a block is mid-push 2 ahead (extending, same direction) → instantly finish it
                     SimPistonMovingEntity twoAheadBE = blockEntities.get(twoAheadPos);
                     boolean instantFinished = false;
+
+                    // Catch mid-push blocks
                     if (twoAheadBE != null && twoAheadBE.extending && twoAheadBE.direction == facing) {
                         log("Instant finalTick on mid-push block at " + twoAheadPos.toShortString());
                         twoAheadBE.finalTick(this);
@@ -270,7 +301,6 @@ public class Slimestone implements ModInitializer {
                     }
 
                     if (!instantFinished) {
-                        // Vanilla pull condition (mirrors PistonBaseBlock.triggerEvent type-1 branch)
                         BlockState twoAheadState = getBlockState(twoAheadPos);
                         boolean shouldPull = !twoAheadState.isAir()
                                 && isPushableForPull(twoAheadState, twoAheadPos, facing.getOpposite(), facing)
@@ -279,26 +309,27 @@ public class Slimestone implements ModInitializer {
                                 || twoAheadState.is(Blocks.STICKY_PISTON));
 
                         if (shouldPull) {
-                            clearHeadPos(headPos);
                             SimPistonResolver resolver = new SimPistonResolver(this, pos, facing, false);
+
                             if (resolver.resolve()) {
-                                moveBlocks(pos, state, facing, false, resolver);
+                                // Use currentState here!
+                                moveBlocks(pos, currentState, facing, false, resolver);
                             } else {
                                 log("§cRetract pull failed: " + resolver.getFailureReason());
+                                updateNeighborsAt(headPos);
                             }
                         } else {
-                            log("Not pulling: conditions not met at " + twoAheadPos.toShortString());
-                            clearHeadPos(headPos);
+                            updateNeighborsAt(headPos);
                         }
                     }
                 } else {
-                    // Normal piston: always clear the head position
-                    clearHeadPos(headPos);
+                    updateNeighborsAt(headPos);
                 }
             }
         }
 
         private void moveBlocks(BlockPos pistonPos, BlockState pistonState, Direction dir, boolean extending, SimPistonResolver resolver) {
+
             List<BlockPos> toPush = resolver.toPush;
             List<BlockPos> toDestroy = resolver.toDestroy;
 
@@ -317,6 +348,10 @@ public class Slimestone implements ModInitializer {
             Direction moveDir = extending ? dir : dir.getOpposite();
             BlockPos headPos = pistonPos.relative(dir);
 
+            if (!extending && getBlockState(headPos).is(Blocks.PISTON_HEAD)) {
+                setBlockRaw(headPos, Blocks.AIR.defaultBlockState());
+            }
+
             for (int i = toPush.size() - 1; i >= 0; i--) {
                 BlockPos oldPos = toPush.get(i);
                 BlockPos newPos = oldPos.relative(moveDir);
@@ -329,7 +364,7 @@ public class Slimestone implements ModInitializer {
                 blockEntities.put(newPos, be);
 
                 setBlockRaw(newPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
-                //log("Created MovingPiston BE at " + newPos.toShortString() + " carrying " + movingState.getBlock().getName().getString());
+                log("Created MovingPiston BE at " + newPos.toShortString() + " carrying " + movingState.getBlock().getName().getString());
             }
 
             if (extending) {
@@ -342,7 +377,7 @@ public class Slimestone implements ModInitializer {
                 SimPistonMovingEntity headBE = new SimPistonMovingEntity(headPos, headState, dir, true, true);
                 blockEntities.put(headPos, headBE);
                 setBlockRaw(headPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
-                //log("Created MovingPiston BE at " + headPos.toShortString() + " carrying PISTON_HEAD");
+                log("Created MovingPiston BE at " + headPos.toShortString() + " carrying PISTON_HEAD");
             }
 
             for (BlockPos p : vacatedSpots.keySet()) {
@@ -350,11 +385,11 @@ public class Slimestone implements ModInitializer {
             }
 
             for (int i = toPush.size() - 1; i >= 0; i--) {
-                //log("Firing neighbor updates for vacated pushed pos: " + toPush.get(i).toShortString());
+                log("Firing neighbor updates for vacated pushed pos: " + toPush.get(i).toShortString());
                 updateNeighborsAt(toPush.get(i));
             }
             if (extending) {
-                //log("Firing neighbor updates for moving piston head starting pos: " + headPos.toShortString());
+                log("Firing neighbor updates for moving piston head starting pos: " + headPos.toShortString());
                 updateNeighborsAt(headPos);
             }
         }
@@ -367,8 +402,8 @@ public class Slimestone implements ModInitializer {
             boolean wasAir = getBlockState(headPos).isAir();
             setBlockRaw(headPos, Blocks.AIR.defaultBlockState());
             if (!wasAir) {
-                //log("Set " + headPos.toShortString() + " to Air (cleared head)");
-                //log("Firing neighbor updates for cleared head at: " + headPos.toShortString());
+                log("Set " + headPos.toShortString() + " to Air (cleared head)");
+                log("Firing neighbor updates for cleared head at: " + headPos.toShortString());
                 updateNeighborsAt(headPos);
             }
         }
@@ -381,7 +416,8 @@ public class Slimestone implements ModInitializer {
          * PUSH_ONLY blocks always return false here because pushDir != pistonFacing when pulling.
          */
         private boolean isPushableForPull(BlockState state, BlockPos pos, Direction pushDir, Direction pistonFacing) {
-            if (state.isAir()) return false;
+            if (blockEntities.containsKey(pos)) return false; // Moving Pistons are Block Entities!
+            if (state.isAir() || state.is(Blocks.BEDROCK)) return false;
             if (state.is(Blocks.OBSIDIAN) || state.is(Blocks.CRYING_OBSIDIAN)
                     || state.is(Blocks.RESPAWN_ANCHOR) || state.is(Blocks.REINFORCED_DEEPSLATE)
                     || state.is(Blocks.BEDROCK)) return false;
@@ -419,26 +455,31 @@ public class Slimestone implements ModInitializer {
 
         public void tick(VirtualLevel level) {
             progress += 0.5f;
-            //level.log("Moving block at " + pos.toShortString() + " progressing: " + progress);
+            level.log("Moving block at " + pos.toShortString() + " progressing: " + progress);
 
             if (progress >= 1.0f) {
-                finalTick(level);
+                // Natural completion
+                level.blockEntities.remove(pos);
+                level.setBlock(pos, movedState);
+
+                if (movedState.getBlock() instanceof PistonBaseBlock) {
+                    level.checkIfExtend(pos, movedState);
+                }
+                level.updateNeighborsAt(pos);
             }
         }
 
         public void finalTick(VirtualLevel level) {
+            // Forced interruption (e.g. block destroyed or piston retracted mid-push)
             level.blockEntities.remove(pos);
-            level.setBlock(pos, movedState);
-            level.log("Block arrived: " + movedState.getBlock().getName().getString() + " at " + pos.toShortString());
 
-            // NEW: Self-update for arriving pistons before broadcasting to neighbors
-            if (movedState.getBlock() instanceof PistonBaseBlock) {
-                level.log("Evaluating power state for newly arrived piston at: " + pos.toShortString());
-                level.checkIfExtend(pos, movedState);
+            // Vanilla Rule: If this is the Piston Head getting interrupted, it vanishes.
+            BlockState stateToPlace = isSourcePiston ? Blocks.AIR.defaultBlockState() : movedState;
+            level.setBlock(pos, stateToPlace);
+
+            if (stateToPlace.getBlock() instanceof PistonBaseBlock) {
+                level.checkIfExtend(pos, stateToPlace);
             }
-
-            // Log and fire neighbor updates mirroring vanilla `tick()` placing the block
-            //level.log("Firing neighbor updates for arrived block at: " + pos.toShortString());
             level.updateNeighborsAt(pos);
         }
     }
@@ -481,7 +522,7 @@ public class Slimestone implements ModInitializer {
 
             if (startState.isAir()) return true;
 
-            if (!isPushable(startState, pushDirection)) {
+            if (!isPushable(startState, pushDirection, startPos)) {
                 if (extending && startState.getPistonPushReaction() == PushReaction.DESTROY) {
                     toDestroy.add(startPos);
                     return true;
@@ -505,7 +546,7 @@ public class Slimestone implements ModInitializer {
 
         private boolean addBlockLine(BlockPos pos, Direction dir) {
             BlockState state = level.getBlockState(pos);
-            if (state.isAir() || !isPushable(state, dir) || pos.equals(pistonPos) || toPush.contains(pos)) return true;
+            if (state.isAir() || !isPushable(state, dir, pos) || pos.equals(pistonPos) || toPush.contains(pos)) return true;
 
             int count = 1;
             while (isSticky(state)) {
@@ -516,26 +557,37 @@ public class Slimestone implements ModInitializer {
                 count++;
                 if (count + toPush.size() > 12) {
                     this.failurePos = pos;
-                    this.failureReason = "Piston push limit (12) reached";
+                    this.failureReason = "Piston push limit (12) reached backwards";
                     return false;
                 }
             }
 
+            int addedCount = 0;
             for (int i = count - 1; i >= 0; i--) {
                 toPush.add(pos.relative(pushDirection.getOpposite(), i));
+                addedCount++;
             }
 
             int step = 1;
             while (true) {
                 BlockPos nextPos = pos.relative(pushDirection, step);
-                if (toPush.contains(nextPos)) return true;
+                int idx = toPush.indexOf(nextPos);
+                if (idx > -1) {
+                    // Fix: Reorder list upon slimeblock collision loop!
+                    reorderListAtCollision(addedCount, idx);
+                    for (int i = 0; i <= idx + addedCount; i++) {
+                        BlockPos p = toPush.get(i);
+                        if (isSticky(level.getBlockState(p)) && !addBranchingBlocks(p)) return false;
+                    }
+                    return true;
+                }
 
                 BlockState nextState = level.getBlockState(nextPos);
                 if (nextState.isAir()) return true;
 
-                if (!isPushable(nextState, pushDirection) || nextPos.equals(pistonPos)) {
+                if (!isPushable(nextState, pushDirection, nextPos) || nextPos.equals(pistonPos)) {
                     this.failurePos = nextPos;
-                    this.failureReason = "Blocked by unpushable block/world at " + nextPos.toShortString();
+                    this.failureReason = "Blocked by unpushable block at " + nextPos.toShortString();
                     return false;
                 }
 
@@ -546,10 +598,11 @@ public class Slimestone implements ModInitializer {
 
                 if (toPush.size() >= 12) {
                     this.failurePos = nextPos;
-                    this.failureReason = "Piston push limit (12) reached";
+                    this.failureReason = "Piston push limit (12) reached forwards";
                     return false;
                 }
                 toPush.add(nextPos);
+                addedCount++;
                 step++;
             }
         }
@@ -568,8 +621,20 @@ public class Slimestone implements ModInitializer {
         public BlockPos getFailurePos() { return failurePos; }
         public String getFailureReason() { return failureReason; }
 
-        private boolean isPushable(BlockState state, Direction dir) {
-            if (state.isAir() || state.is(Blocks.OBSIDIAN) || state.is(Blocks.CRYING_OBSIDIAN) || state.is(Blocks.RESPAWN_ANCHOR) || state.is(Blocks.REINFORCED_DEEPSLATE)) return false;
+        private void reorderListAtCollision(int newlyAddedCount, int collisionIndex) {
+            List<BlockPos> list1 = new ArrayList<>(toPush.subList(0, collisionIndex));
+            List<BlockPos> list2 = new ArrayList<>(toPush.subList(toPush.size() - newlyAddedCount, toPush.size()));
+            List<BlockPos> list3 = new ArrayList<>(toPush.subList(collisionIndex, toPush.size() - newlyAddedCount));
+            toPush.clear();
+            toPush.addAll(list1);
+            toPush.addAll(list2);
+            toPush.addAll(list3);
+        }
+
+
+        private boolean isPushable(BlockState state, Direction dir, BlockPos pos) {
+            if (level.blockEntities.containsKey(pos)) return false; // Prevent pushing moving pistons
+            if (state.isAir() || state.is(Blocks.OBSIDIAN) || state.is(Blocks.CRYING_OBSIDIAN) || state.is(Blocks.RESPAWN_ANCHOR) || state.is(Blocks.REINFORCED_DEEPSLATE) || state.is(Blocks.BEDROCK)) return false;
 
             if (!state.is(Blocks.PISTON) && !state.is(Blocks.STICKY_PISTON)) {
                 if (state.getPistonPushReaction() == PushReaction.BLOCK) return false;
@@ -578,6 +643,8 @@ public class Slimestone implements ModInitializer {
             }
             return true;
         }
+
+
 
         private boolean isSticky(BlockState state) {
             return state.is(Blocks.SLIME_BLOCK) || state.is(Blocks.HONEY_BLOCK);
