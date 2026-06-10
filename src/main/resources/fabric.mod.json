@@ -12,11 +12,9 @@
 	"environment": "*",
 	"entrypoints": {
 		"main": [
-			"com.pingu.Slimestone"
+			"com.pingu.slimestone.Slimestone"
 		],
-		"client": [
-			"com.pingu.SlimestoneClient"
-		],
+
 		"fabric-datagen": [
 			"com.pingu.SlimestoneDataGenerator"
 		]

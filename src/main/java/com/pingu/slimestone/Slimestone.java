@@ -133,9 +133,7 @@ public class Slimestone implements ModInitializer {
             while (!neighborUpdates.isEmpty()) {
                 NeighborUpdate update = neighborUpdates.poll();
                 BlockState state = getBlockState(update.pos);
-                if (state.getBlock() instanceof PistonBaseBlock) {
-                    checkIfExtend(update.pos, state);
-                }
+                handlePistonUpdate(update.pos, state); // Replaced inline check
             }
             currentPhase = previousPhase;
         }
@@ -147,18 +145,42 @@ public class Slimestone implements ModInitializer {
             for (Direction dir : UPDATE_ORDER) {
                 BlockPos neighborPos = pos.relative(dir);
                 BlockState state = getBlockState(neighborPos);
-                if (state.getBlock() instanceof PistonBaseBlock) {
-                    checkIfExtend(neighborPos, state);
-                }
+                handlePistonUpdate(neighborPos, state); // Replaced inline check
             }
 
             currentPhase = previousPhase;
         }
 
+        // NEW HELPER: Routes updates from the extended arm to the base
+        private void handlePistonUpdate(BlockPos pos, BlockState state) {
+            if (state.getBlock() instanceof PistonBaseBlock) {
+                checkIfExtend(pos, state);
+            } else if (state.getBlock() instanceof PistonHeadBlock) {
+                Direction facing = state.getValue(PistonHeadBlock.FACING);
+                BlockPos basePos = pos.relative(facing.getOpposite());
+                BlockState baseState = getBlockState(basePos);
+
+                // Instantly pass the update down to the base
+                if (baseState.getBlock() instanceof PistonBaseBlock) {
+                    checkIfExtend(basePos, baseState);
+                }
+            }
+        }
+
         public boolean hasRedstoneBlockPower(BlockPos pos) {
+            // Standard adjacent checks
             for (Direction dir : Direction.values()) {
                 if (getBlockState(pos.relative(dir)).is(Blocks.REDSTONE_BLOCK)) return true;
             }
+
+            // Quasi-connectivity: 2 above, and +1 in each horizontal direction from the block above
+            BlockPos above = pos.above();
+            if (getBlockState(above.above()).is(Blocks.REDSTONE_BLOCK)) return true; // 2 above
+            if (getBlockState(above.north()).is(Blocks.REDSTONE_BLOCK)) return true; // +1 North
+            if (getBlockState(above.south()).is(Blocks.REDSTONE_BLOCK)) return true; // +1 South
+            if (getBlockState(above.east()).is(Blocks.REDSTONE_BLOCK)) return true;  // +1 East
+            if (getBlockState(above.west()).is(Blocks.REDSTONE_BLOCK)) return true;  // +1 West
+
             return false;
         }
 
