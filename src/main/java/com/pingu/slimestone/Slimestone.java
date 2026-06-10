@@ -60,7 +60,7 @@ public class Slimestone implements ModInitializer {
 
         level.log("Simulation Initialized. Checking initial power for piston at " + targetPos.toShortString());
         level.checkIfExtend(targetPos, targetState);
-        level.runTickLoop(10);
+        level.runTickLoop(100);
     }
 
     // ==========================================
@@ -141,9 +141,18 @@ public class Slimestone implements ModInitializer {
         }
 
         public void updateNeighborsAt(BlockPos pos) {
+            String previousPhase = currentPhase;
+            currentPhase = "NEIGHBOR UPDATES";
+
             for (Direction dir : UPDATE_ORDER) {
-                neighborUpdates.add(new NeighborUpdate(pos.relative(dir), pos));
+                BlockPos neighborPos = pos.relative(dir);
+                BlockState state = getBlockState(neighborPos);
+                if (state.getBlock() instanceof PistonBaseBlock) {
+                    checkIfExtend(neighborPos, state);
+                }
             }
+
+            currentPhase = previousPhase;
         }
 
         public boolean hasRedstoneBlockPower(BlockPos pos) {
