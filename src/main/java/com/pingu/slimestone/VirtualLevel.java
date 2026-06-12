@@ -206,9 +206,8 @@ public class VirtualLevel {
 
             log("Set block at " + pos.toShortString() + " to "
                     + (extendIsSticky ? "Sticky Piston Headless Base" : "Piston Headless Base"));
-            log("Firing neighbor updates for piston base at: " + pos.toShortString());
+            //log("Firing neighbor updates for piston base at: " + pos.toShortString());
             updateNeighborsAt(pos);
-
         } else if (type == 1) {
             if (isPowered) {
                 log("§eRetract cancelled: piston re-gained power at " + pos.toShortString());
@@ -219,11 +218,14 @@ public class VirtualLevel {
             boolean isSticky = currentState.getBlock() == Blocks.STICKY_PISTON;
             BlockPos headPos = pos.relative(facing);
 
-            // Transition the base to MOVING_PISTON BEFORE removing the head. This matches
-            // Minecraft's retraction order: once the base is MOVING_PISTON, any onRemove-like
-            // check on the head will call isFittingBase and correctly find MOVING_PISTON (not
-            // an extended PISTON/STICKY_PISTON), so it returns false and takes no action —
-            // exactly the same no-op that occurs in real Minecraft during retraction.
+            // 1. Unconditionally final-tick ANY moving block at the head position (Vanilla Step 1)
+            SimPistonMovingEntity headBE = blockEntities.get(headPos);
+            if (headBE != null) {
+                log("Instant finalTick on moving head at " + headPos.toShortString());
+                headBE.finalTick(this);
+            }
+
+            // 2. Base transitions to MOVING_PISTON
             PistonType pType = isSticky ? PistonType.STICKY : PistonType.DEFAULT;
             BlockState movingBaseState = Blocks.MOVING_PISTON.defaultBlockState()
                     .setValue(BlockStateProperties.FACING, facing)
@@ -234,33 +236,8 @@ public class VirtualLevel {
             blockEntities.put(pos, new SimPistonMovingEntity(pos, unextendedBase, facing, false, true));
             log("Created MovingPiston BE at " + pos.toShortString() + " for Retracting "
                     + (isSticky ? "Sticky " : "") + "Base");
-
-            // Remove the head now that the base is safely MOVING_PISTON. If a moving block
-            // entity is already at headPos (an interrupted mid-extension), finalTick it to
-            // resolve cleanly. Otherwise use setBlock so the deletion is visible in the log.
-            SimPistonMovingEntity headBE = blockEntities.get(headPos);
-            if (headBE != null) {
-                log("Instant finalTick on moving head at " + headPos.toShortString());
-                headBE.finalTick(this);
-            } else {
-                BlockState headState = getBlockState(headPos);
-                if (!headState.isAir()) {
-                    if (headState.getBlock() instanceof PistonHeadBlock) {
-                        log("§c[Instant Delete] PISTON_HEAD facing "
-                                + headState.getValue(PistonHeadBlock.FACING).getName().toUpperCase()
-                                + " at " + headPos.toShortString()
-                                + " — no MovingPiston BE, removing directly");
-                    }
-                    setBlock(headPos, Blocks.AIR.defaultBlockState());
-                    if (headState.getBlock() instanceof PistonHeadBlock) {
-                        simulatePistonHeadOnRemove(headPos, headState);
-                    }
-                }
-            }
-
-            log("Firing neighbor updates for retracting base at: " + pos.toShortString());
+            //log("Firing neighbor updates for retracting base at: " + pos.toShortString());
             updateNeighborsAt(pos);
-
             if (isSticky) {
                 BlockPos twoAheadPos = pos.relative(facing, 2);
                 SimPistonMovingEntity twoAheadBE = blockEntities.get(twoAheadPos);
@@ -280,25 +257,59 @@ public class VirtualLevel {
                             || twoAheadState.is(Blocks.PISTON)
                             || twoAheadState.is(Blocks.STICKY_PISTON));
 
-                    if (shouldPull) {
+                    if (!shouldPull) {
+                        // Vanilla calls removeBlock unconditionally if no pull is attempted.
+                        // This DOES trigger neighbor updates at the head position.
+                        removeHeadBlock(headPos);
+                    } else {
+                        // Vanilla delegates to moveBlocks(..., false).
+                        // It silently clears the PISTON_HEAD with flag 20 (no neighbor updates).
+                        BlockState headStateBeforeResolve = getBlockState(headPos);
+
+                        if (headStateBeforeResolve.is(Blocks.PISTON_HEAD)) {
+                            log("§7[Vanilla moveBlocks] Clearing PISTON_HEAD quietly before resolver (Flag 20)");
+                            setBlockRaw(headPos, Blocks.AIR.defaultBlockState());
+                            // We explicitly skip simulatePistonHeadOnRemove here.
+                            // The base is already MOVING_PISTON, so no base destruction occurs,
+                            // and flag 20 suppresses all block removal neighbor updates.
+                        }
+
                         SimPistonResolver resolver = new SimPistonResolver(this, pos, facing, false);
 
                         if (resolver.resolve()) {
                             moveBlocks(pos, currentState, facing, false, resolver);
                         } else {
                             log("§cRetract pull failed: " + resolver.getFailureReason());
-                            updateNeighborsAt(headPos);
+                            // Nothing else happens.
+                            // The Piston Head stays deleted, Obsidian stays put, and crucially:
+                            // NO neighbor updates are fired from headPos.
                         }
-                    } else {
-                        updateNeighborsAt(headPos);
                     }
                 }
             } else {
-                updateNeighborsAt(headPos);
+                // Normal piston
+                removeHeadBlock(headPos);
             }
         }
     }
+    private void removeHeadBlock(BlockPos headPos) {
+        BlockState headState = getBlockState(headPos);
+        if (!headState.isAir()) {
+            if (headState.getBlock() instanceof PistonHeadBlock) {
+                log("§c[Instant Delete] PISTON_HEAD facing "
+                        + headState.getValue(PistonHeadBlock.FACING).getName().toUpperCase()
+                        + " at " + headPos.toShortString());
+            } else {
+                log("§c[Instant Delete] Block " + headState.getBlock().getName().getString() + " at " + headPos.toShortString());
+            }
+            setBlock(headPos, Blocks.AIR.defaultBlockState());
 
+            if (headState.getBlock() instanceof PistonHeadBlock) {
+                simulatePistonHeadOnRemove(headPos, headState);
+            }
+        }
+        updateNeighborsAt(headPos);
+    }
     private void moveBlocks(BlockPos pistonPos, BlockState pistonState, Direction dir, boolean extending, SimPistonResolver resolver) {
         List<BlockPos> toPush = resolver.toPush;
         List<BlockPos> toDestroy = resolver.toDestroy;
@@ -334,7 +345,7 @@ public class VirtualLevel {
             blockEntities.put(newPos, be);
 
             setBlockRaw(newPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
-            log("Created MovingPiston BE at " + newPos.toShortString() + " carrying " + movingState.getBlock().getName().getString());
+            //log("Created MovingPiston BE at " + newPos.toShortString() + " carrying " + movingState.getBlock().getName().getString());
         }
 
         if (extending) {
@@ -347,7 +358,7 @@ public class VirtualLevel {
             SimPistonMovingEntity headBE = new SimPistonMovingEntity(headPos, headState, dir, true, true);
             blockEntities.put(headPos, headBE);
             setBlockRaw(headPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
-            log("Created MovingPiston BE at " + headPos.toShortString() + " carrying PISTON_HEAD");
+            //log("Created MovingPiston BE at " + headPos.toShortString() + " carrying PISTON_HEAD");
         }
 
         for (BlockPos p : vacatedSpots.keySet()) {
@@ -355,24 +366,15 @@ public class VirtualLevel {
         }
 
         for (int i = toPush.size() - 1; i >= 0; i--) {
-            log("Firing neighbor updates for vacated pushed pos: " + toPush.get(i).toShortString());
+            //log("Firing neighbor updates for vacated pushed pos: " + toPush.get(i).toShortString());
             updateNeighborsAt(toPush.get(i));
         }
         if (extending) {
-            log("Firing neighbor updates for moving piston head starting pos: " + headPos.toShortString());
+            //log("Firing neighbor updates for moving piston head starting pos: " + headPos.toShortString());
             updateNeighborsAt(headPos);
         }
     }
 
-    /**
-     * Mirrors {@code PistonHeadBlock.onRemove}: if the block directly behind the
-     * deleted head is still a fitting extended-piston base, destroys it instantly
-     * and fires its neighbour updates (matching the {@code destroyBlock} call in
-     * vanilla).  Also enumerates every position that will receive a neighbour
-     * update from the head deletion itself — the actual
-     * {@link #updateNeighborsAt(BlockPos)} call for {@code headPos} is already
-     * issued later in the retraction flow and is intentionally NOT repeated here.
-     */
     private void simulatePistonHeadOnRemove(BlockPos headPos, BlockState headState) {
         Direction headFacing = headState.getValue(PistonHeadBlock.FACING);
         PistonType headType  = headState.getValue(PistonHeadBlock.TYPE);
@@ -408,7 +410,7 @@ public class VirtualLevel {
         // the instant-delete log rather than buried later in the output.
         log("§d[onRemove] Neighbour updates from PISTON_HEAD deletion at " + headPos.toShortString() + ":");
         for (Direction dir : UPDATE_ORDER) {
-            log("§d    " + dir.getName().toUpperCase() + " → " + headPos.relative(dir).toShortString());
+            //log("§d    " + dir.getName().toUpperCase() + " → " + headPos.relative(dir).toShortString());
         }
     }
 
