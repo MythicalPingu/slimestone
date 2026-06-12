@@ -24,7 +24,7 @@ public class SimPistonMovingEntity {
 
     public void tick(VirtualLevel level) {
         progress += 0.5f;
-        level.log("Moving block at " + pos.toShortString() + " progressing: " + progress);
+        //level.log("Moving block at " + pos.toShortString() + " progressing: " + progress);
 
         if (progress >= 1.0f) {
             level.blockEntities.remove(pos);

@@ -396,7 +396,7 @@ public class VirtualLevel {
             setBlock(basePos, Blocks.AIR.defaultBlockState());
             log("§d[onRemove] Neighbour updates from base destruction at " + basePos.toShortString() + ":");
             for (Direction dir : UPDATE_ORDER) {
-                log("§d    " + dir.getName().toUpperCase() + " → " + basePos.relative(dir).toShortString());
+                //log("§d    " + dir.getName().toUpperCase() + " → " + basePos.relative(dir).toShortString());
             }
             updateNeighborsAt(basePos);
         } else {
