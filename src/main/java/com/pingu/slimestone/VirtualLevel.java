@@ -1,5 +1,5 @@
 package com.pingu.slimestone;
-
+import net.minecraft.world.level.block.Block;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
@@ -117,6 +117,26 @@ public class VirtualLevel {
             BlockPos basePos = pos.relative(facing.getOpposite());
             BlockState baseState = getBlockState(basePos);
 
+            // 1. Emulate vanilla PistonHeadBlock.canSurvive()
+            PistonType headType = state.getValue(PistonHeadBlock.TYPE);
+            Block expectedBase = headType == PistonType.DEFAULT ? Blocks.PISTON : Blocks.STICKY_PISTON;
+
+            boolean isFittingBase = baseState.is(expectedBase)
+                    && baseState.getValue(PistonBaseBlock.EXTENDED)
+                    && baseState.getValue(PistonBaseBlock.FACING) == facing;
+
+            boolean isMovingBase = baseState.is(Blocks.MOVING_PISTON)
+                    && baseState.getValue(BlockStateProperties.FACING) == facing;
+
+            if (!isFittingBase && !isMovingBase) {
+                log("§c[Survival] PISTON_HEAD at " + pos.toShortString() + " lost its valid base, destroying it");
+                setBlock(pos, Blocks.AIR.defaultBlockState());
+                log("§d[Survival] Firing neighbor updates for destroyed PISTON_HEAD at: " + pos.toShortString());
+                updateNeighborsAt(pos);
+                return; // Stop processing since the head is now Air
+            }
+
+            // 2. If it survives, pass the update to the base (emulating vanilla neighborChanged)
             if (baseState.getBlock() instanceof PistonBaseBlock) {
                 checkIfExtend(basePos, baseState);
             }
@@ -198,14 +218,12 @@ public class VirtualLevel {
 
             boolean isSticky = currentState.getBlock() == Blocks.STICKY_PISTON;
             BlockPos headPos = pos.relative(facing);
-            setBlockRaw(headPos, Blocks.AIR.defaultBlockState());
 
-            SimPistonMovingEntity headBE = blockEntities.get(headPos);
-            if (headBE != null) {
-                log("Instant finalTick on moving head at " + headPos.toShortString());
-                headBE.finalTick(this);
-            }
-
+            // Transition the base to MOVING_PISTON BEFORE removing the head. This matches
+            // Minecraft's retraction order: once the base is MOVING_PISTON, any onRemove-like
+            // check on the head will call isFittingBase and correctly find MOVING_PISTON (not
+            // an extended PISTON/STICKY_PISTON), so it returns false and takes no action —
+            // exactly the same no-op that occurs in real Minecraft during retraction.
             PistonType pType = isSticky ? PistonType.STICKY : PistonType.DEFAULT;
             BlockState movingBaseState = Blocks.MOVING_PISTON.defaultBlockState()
                     .setValue(BlockStateProperties.FACING, facing)
@@ -216,6 +234,29 @@ public class VirtualLevel {
             blockEntities.put(pos, new SimPistonMovingEntity(pos, unextendedBase, facing, false, true));
             log("Created MovingPiston BE at " + pos.toShortString() + " for Retracting "
                     + (isSticky ? "Sticky " : "") + "Base");
+
+            // Remove the head now that the base is safely MOVING_PISTON. If a moving block
+            // entity is already at headPos (an interrupted mid-extension), finalTick it to
+            // resolve cleanly. Otherwise use setBlock so the deletion is visible in the log.
+            SimPistonMovingEntity headBE = blockEntities.get(headPos);
+            if (headBE != null) {
+                log("Instant finalTick on moving head at " + headPos.toShortString());
+                headBE.finalTick(this);
+            } else {
+                BlockState headState = getBlockState(headPos);
+                if (!headState.isAir()) {
+                    if (headState.getBlock() instanceof PistonHeadBlock) {
+                        log("§c[Instant Delete] PISTON_HEAD facing "
+                                + headState.getValue(PistonHeadBlock.FACING).getName().toUpperCase()
+                                + " at " + headPos.toShortString()
+                                + " — no MovingPiston BE, removing directly");
+                    }
+                    setBlock(headPos, Blocks.AIR.defaultBlockState());
+                    if (headState.getBlock() instanceof PistonHeadBlock) {
+                        simulatePistonHeadOnRemove(headPos, headState);
+                    }
+                }
+            }
 
             log("Firing neighbor updates for retracting base at: " + pos.toShortString());
             updateNeighborsAt(pos);
@@ -320,6 +361,54 @@ public class VirtualLevel {
         if (extending) {
             log("Firing neighbor updates for moving piston head starting pos: " + headPos.toShortString());
             updateNeighborsAt(headPos);
+        }
+    }
+
+    /**
+     * Mirrors {@code PistonHeadBlock.onRemove}: if the block directly behind the
+     * deleted head is still a fitting extended-piston base, destroys it instantly
+     * and fires its neighbour updates (matching the {@code destroyBlock} call in
+     * vanilla).  Also enumerates every position that will receive a neighbour
+     * update from the head deletion itself — the actual
+     * {@link #updateNeighborsAt(BlockPos)} call for {@code headPos} is already
+     * issued later in the retraction flow and is intentionally NOT repeated here.
+     */
+    private void simulatePistonHeadOnRemove(BlockPos headPos, BlockState headState) {
+        Direction headFacing = headState.getValue(PistonHeadBlock.FACING);
+        PistonType headType  = headState.getValue(PistonHeadBlock.TYPE);
+        BlockPos   basePos   = headPos.relative(headFacing.getOpposite());
+        BlockState baseState = getBlockState(basePos);
+
+        // Replicate PistonHeadBlock.isFittingBase (private in vanilla):
+        //   Block expected = type == DEFAULT ? Blocks.PISTON : Blocks.STICKY_PISTON;
+        //   return base.is(expected) && base[EXTENDED] && base[FACING] == head[FACING];
+        Block expectedBase = headType == PistonType.DEFAULT ? Blocks.PISTON : Blocks.STICKY_PISTON;
+        boolean fittingBase = baseState.is(expectedBase)
+                && baseState.getValue(PistonBaseBlock.EXTENDED)
+                && baseState.getValue(PistonBaseBlock.FACING) == headFacing;
+
+        if (fittingBase) {
+            log("§c[onRemove] isFittingBase=true — "
+                    + (headType == PistonType.STICKY ? "sticky " : "")
+                    + "base still EXTENDED at " + basePos.toShortString() + ", destroying it");
+            setBlock(basePos, Blocks.AIR.defaultBlockState());
+            log("§d[onRemove] Neighbour updates from base destruction at " + basePos.toShortString() + ":");
+            for (Direction dir : UPDATE_ORDER) {
+                log("§d    " + dir.getName().toUpperCase() + " → " + basePos.relative(dir).toShortString());
+            }
+            updateNeighborsAt(basePos);
+        } else {
+            log("§7[onRemove] isFittingBase=false — "
+                    + baseState.getBlock().getName().getString()
+                    + " at " + basePos.toShortString() + " is not a fitting base, no further deletion");
+        }
+
+        // Enumerate the six positions that updateNeighborsAt(headPos) will touch
+        // later in the retraction flow. Printed here so they appear adjacent to
+        // the instant-delete log rather than buried later in the output.
+        log("§d[onRemove] Neighbour updates from PISTON_HEAD deletion at " + headPos.toShortString() + ":");
+        for (Direction dir : UPDATE_ORDER) {
+            log("§d    " + dir.getName().toUpperCase() + " → " + headPos.relative(dir).toShortString());
         }
     }
 
