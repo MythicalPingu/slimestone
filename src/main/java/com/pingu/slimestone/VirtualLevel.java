@@ -91,7 +91,8 @@ public class VirtualLevel {
         while (!neighborUpdates.isEmpty()) {
             NeighborUpdate update = neighborUpdates.poll();
             BlockState state = getBlockState(update.pos());
-            handlePistonUpdate(update.pos(), state);
+            // Pass the fromPos to the handler
+            handleNeighborUpdate(update.pos(), state, update.fromPos());
         }
         currentPhase = previousPhase;
     }
@@ -103,13 +104,49 @@ public class VirtualLevel {
         for (Direction dir : UPDATE_ORDER) {
             BlockPos neighborPos = pos.relative(dir);
             BlockState state = getBlockState(neighborPos);
-            handlePistonUpdate(neighborPos, state);
+            // Pass 'pos' as the fromPos
+            handleNeighborUpdate(neighborPos, state, pos);
+        }
+
+        currentPhase = previousPhase;
+    }
+    public void fireShapeUpdates(BlockPos pos) {
+        String previousPhase = currentPhase;
+        currentPhase = "SHAPE UPDATES";
+
+        for (Direction dir : UPDATE_ORDER) {
+            BlockPos neighborPos = pos.relative(dir);
+            BlockState state = getBlockState(neighborPos);
+
+            // Only trigger Observer (shape update) logic, completely ignoring Piston logic
+            if (state.is(Blocks.OBSERVER)) {
+                Direction facing = state.getValue(BlockStateProperties.FACING);
+                BlockPos lookingAt = neighborPos.relative(facing);
+
+                if (lookingAt.equals(pos)) {
+                    log("§a[Observer] Shape update detected at " + neighborPos.toShortString() + " from source " + pos.toShortString());
+                }
+            }
         }
 
         currentPhase = previousPhase;
     }
 
-    private void handlePistonUpdate(BlockPos pos, BlockState state) {
+    private void handleNeighborUpdate(BlockPos pos, BlockState state, BlockPos fromPos) {
+        // --- OBSERVER SHAPE UPDATE SIMULATION ---
+        if (state.is(Blocks.OBSERVER)) {
+            // Vanilla ObserverBlock checks if directionToNeighbour == FACING
+            Direction facing = state.getValue(BlockStateProperties.FACING);
+            BlockPos lookingAt = pos.relative(facing);
+
+            if (lookingAt.equals(fromPos)) {
+                log("§a[Observer] Shape update detected at " + pos.toShortString() + " from source " + fromPos.toShortString());
+                // Note: In a full simulation, you would check if !(Boolean)state.getValue(POWERED)
+                // and then queue a block tick using this.startSignal() here.
+            }
+        }
+
+        // --- EXISTING PISTON LOGIC ---
         if (state.getBlock() instanceof PistonBaseBlock) {
             checkIfExtend(pos, state);
         } else if (state.getBlock() instanceof PistonHeadBlock) {
@@ -307,8 +344,9 @@ public class VirtualLevel {
             if (headState.getBlock() instanceof PistonHeadBlock) {
                 simulatePistonHeadOnRemove(headPos, headState);
             }
+            updateNeighborsAt(headPos);
         }
-        updateNeighborsAt(headPos);
+
     }
     private void moveBlocks(BlockPos pistonPos, BlockState pistonState, Direction dir, boolean extending, SimPistonResolver resolver) {
         List<BlockPos> toPush = resolver.toPush;
@@ -346,6 +384,7 @@ public class VirtualLevel {
 
             setBlockRaw(newPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
             //log("Created MovingPiston BE at " + newPos.toShortString() + " carrying " + movingState.getBlock().getName().getString());
+            fireShapeUpdates(newPos);
         }
 
         if (extending) {
@@ -359,6 +398,7 @@ public class VirtualLevel {
             blockEntities.put(headPos, headBE);
             setBlockRaw(headPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
             //log("Created MovingPiston BE at " + headPos.toShortString() + " carrying PISTON_HEAD");
+            fireShapeUpdates(headPos);
         }
 
         for (BlockPos p : vacatedSpots.keySet()) {
