@@ -14,7 +14,17 @@ import net.minecraft.world.level.material.PushReaction;
 
 import java.util.*;
 
+
 public class VirtualLevel {
+
+    public static final int UPDATE_NEIGHBORS = 1;
+    public static final int UPDATE_CLIENTS = 2;
+    public static final int UPDATE_INVISIBLE = 4;
+    public static final int UPDATE_KNOWN_SHAPE = 16;
+    public static final int UPDATE_SUPPRESS_DROPS = 32;
+    public static final int UPDATE_MOVED_BY_PISTON = 64;
+    public static final int UPDATE_ALL = UPDATE_NEIGHBORS | UPDATE_CLIENTS;
+
     private static final Direction[] UPDATE_ORDER = new Direction[]{Direction.WEST, Direction.EAST, Direction.DOWN, Direction.UP, Direction.NORTH, Direction.SOUTH};
 
     private final ServerPlayer player;
@@ -62,32 +72,60 @@ public class VirtualLevel {
     }
 
     public void setBlock(BlockPos pos, BlockState state) {
+        setBlock(pos, state, UPDATE_ALL); // Default to flag 3
+    }
+
+    public void setBlock(BlockPos pos, BlockState state, int flags) {
         BlockState oldState = getBlockState(pos);
         setBlockRaw(pos, state);
         log("Set block at " + pos.toShortString() + " to " + state.getBlock().getName().getString());
+
+        // Emulate vanilla calling onPlace immediately after setting the chunk data
         handleOnPlace(pos, state, oldState);
+
+        // Fetch the state AGAIN to see if onPlace modified it recursively
+        BlockState currentState = getBlockState(pos);
+
+        // THE VANILLA CHECK: If onPlace changed the state, suppress all automated updates
+        if (currentState == state) {
+            if ((flags & UPDATE_NEIGHBORS) != 0) {
+                updateNeighborsAt(pos);
+            }
+
+            if ((flags & UPDATE_KNOWN_SHAPE) == 0) {
+                fireShapeUpdates(pos); // Tell neighbors our shape changed
+                evaluateOwnShape(pos, currentState); // Tell ourselves to evaluate surroundings
+            }
+        } else {
+            log("§8[Vanilla Mechanics] Updates suppressed at " + pos.toShortString() + " because onPlace modified the state.");
+        }
     }
+
     private void handleOnPlace(BlockPos pos, BlockState state, BlockState oldState) {
         if (state.is(oldState.getBlock())) return;
 
         // --- Observer Placement / Landing Logic ---
         if (state.is(Blocks.OBSERVER)) {
             boolean isPowered = state.getValue(BlockStateProperties.POWERED);
-            boolean hasPendingTick = hasScheduledTick(pos, Blocks.OBSERVER);
 
-            // 1. Vanilla ObserverBlock.onPlace: Reset spurious powered state if no tick is pending.
-            if (isPowered && !hasPendingTick) {
+            // Vanilla ObserverBlock.onPlace: Reset spurious powered state if no tick is pending.
+            if (isPowered && !hasScheduledTick(pos, Blocks.OBSERVER)) {
                 BlockState unpowered = state.setValue(BlockStateProperties.POWERED, false);
-                setBlockRaw(pos, unpowered);
+
+                // Vanilla uses flag 18: UPDATE_KNOWN_SHAPE (16) | UPDATE_CLIENTS (2)
+                // This intentionally bypasses UPDATE_NEIGHBORS (1) for this nested call
+                setBlock(pos, unpowered, UPDATE_KNOWN_SHAPE | UPDATE_CLIENTS);
+
                 log("§3[Observer] onPlace reset spurious POWERED state at " + pos.toShortString());
                 updateNeighborsFromObserver(pos, unpowered);
-                isPowered = false;
             }
+        }
+    }
 
-            // 2. Vanilla Shape Update Execution
-            // Vanilla checks updateShape on all 6 sides immediately upon placement.
-            // An observer naturally "detects" the block in front of it during this check.
-            if (!isPowered && !hasPendingTick) {
+    private void evaluateOwnShape(BlockPos pos, BlockState state) {
+        // Emulates a placed block running its own shape checks against neighbors upon landing
+        if (state.is(Blocks.OBSERVER)) {
+            if (!state.getValue(BlockStateProperties.POWERED) && !hasScheduledTick(pos, Blocks.OBSERVER)) {
                 scheduleTick(pos, Blocks.OBSERVER, 2);
                 log("§a[Observer] " + pos.toShortString() + " evaluated front shape upon landing → scheduling tick in 2 GT");
             }
@@ -186,20 +224,24 @@ public class VirtualLevel {
         boolean wasPowered = state.getValue(BlockStateProperties.POWERED);
 
         if (wasPowered) {
-            // ── Rising edge complete: turn off
             BlockState unpowered = state.setValue(BlockStateProperties.POWERED, false);
-            // Use setBlockRaw so we don't accidentally re-trigger placement shape updates
             setBlockRaw(pos, unpowered);
             log("§3[Observer] " + pos.toShortString() + " → POWERED=false (pulse end)");
+
+            // 1. Emit Shape Updates to immediate neighbors (corresponds to vanilla setBlock flag 2)
+            fireShapeUpdates(pos);
+            // 2. Emit Redstone Updates to the back block and its neighbors
             updateNeighborsFromObserver(pos, unpowered);
         } else {
-            // ── Pulse start: turn on, schedule turn-off
             BlockState powered = state.setValue(BlockStateProperties.POWERED, true);
             setBlockRaw(pos, powered);
             log("§3[Observer] " + pos.toShortString() + " → POWERED=true (pulse start)");
 
-            // Schedule the falling edge 2 GT from now
             scheduleTick(pos, Blocks.OBSERVER, 2);
+
+            // 1. Emit Shape Updates to immediate neighbors
+            fireShapeUpdates(pos);
+            // 2. Emit Redstone Updates to the back block and its neighbors
             updateNeighborsFromObserver(pos, powered);
         }
     }
@@ -244,45 +286,9 @@ public class VirtualLevel {
 
         currentPhase = previousPhase;
     }
-    public void fireShapeUpdates(BlockPos pos) {
-        String previousPhase = currentPhase;
-        currentPhase = "SHAPE UPDATES";
 
-        for (Direction dir : UPDATE_ORDER) {
-            BlockPos neighborPos = pos.relative(dir);
-            BlockState state = getBlockState(neighborPos);
-
-            // Only trigger Observer (shape update) logic, completely ignoring Piston logic
-            if (state.is(Blocks.OBSERVER)) {
-                Direction facing = state.getValue(BlockStateProperties.FACING);
-                BlockPos lookingAt = neighborPos.relative(facing);
-
-                if (lookingAt.equals(pos)) {
-                    log("§a[Observer] Shape update detected at " + neighborPos.toShortString() + " from source " + pos.toShortString());
-                }
-            }
-        }
-
-        currentPhase = previousPhase;
-    }
 
     private void handleNeighborUpdate(BlockPos pos, BlockState state, BlockPos fromPos) {
-        // --- OBSERVER SHAPE UPDATE SIMULATION ---
-        if (state.is(Blocks.OBSERVER)) {
-            // Vanilla ObserverBlock checks if directionToNeighbour == FACING
-            Direction facing = state.getValue(BlockStateProperties.FACING);
-            BlockPos lookingAt = pos.relative(facing);
-
-            if (lookingAt.equals(fromPos)) {
-                log("§a[Observer] Shape update detected at " + pos.toShortString() + " from source " + fromPos.toShortString());
-
-                // ObserverBlock.updateShape -> startSignal: only schedules a
-                // pulse if currently unpowered and nothing is already pending.
-                if (!state.getValue(BlockStateProperties.POWERED) && !hasScheduledTick(pos, Blocks.OBSERVER)) {
-                    scheduleTick(pos, Blocks.OBSERVER, 2);
-                }
-            }
-        }
 
         // --- EXISTING PISTON LOGIC ---
         if (state.getBlock() instanceof PistonBaseBlock) {
@@ -316,6 +322,31 @@ public class VirtualLevel {
                 checkIfExtend(basePos, baseState);
             }
         }
+    }
+    public void fireShapeUpdates(BlockPos pos) {
+        String previousPhase = currentPhase;
+        currentPhase = "SHAPE UPDATES";
+
+        for (Direction dir : UPDATE_ORDER) {
+            BlockPos neighborPos = pos.relative(dir);
+            BlockState state = getBlockState(neighborPos);
+
+            if (state.is(Blocks.OBSERVER)) {
+                Direction facing = state.getValue(BlockStateProperties.FACING);
+                BlockPos lookingAt = neighborPos.relative(facing);
+
+                if (lookingAt.equals(pos)) {
+                    log("§a[Observer] Shape update detected at " + neighborPos.toShortString() + " from source " + pos.toShortString());
+
+                    // Move the scheduling guard here:
+                    if (!state.getValue(BlockStateProperties.POWERED) && !hasScheduledTick(neighborPos, Blocks.OBSERVER)) {
+                        scheduleTick(neighborPos, Blocks.OBSERVER, 2);
+                    }
+                }
+            }
+        }
+
+        currentPhase = previousPhase;
     }
 
     /**

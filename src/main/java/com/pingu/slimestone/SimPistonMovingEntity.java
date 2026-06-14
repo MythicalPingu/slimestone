@@ -24,16 +24,18 @@ public class SimPistonMovingEntity {
 
     public void tick(VirtualLevel level) {
         progress += 0.5f;
-        //level.log("Moving block at " + pos.toShortString() + " progressing: " + progress);
 
         if (progress >= 1.0f) {
             level.blockEntities.remove(pos);
-            level.setBlock(pos, movedState);
+
+            // Vanilla uses flag 67 for arriving blocks: UPDATE_ALL (3) | UPDATE_MOVED_BY_PISTON (64)
+            // Notice we do NOT pass UPDATE_KNOWN_SHAPE (16) so shape updates trigger natively.
+            level.setBlock(pos, movedState, VirtualLevel.UPDATE_ALL | VirtualLevel.UPDATE_MOVED_BY_PISTON);
 
             if (movedState.getBlock() instanceof PistonBaseBlock) {
                 level.checkIfExtend(pos, movedState);
             }
-            level.updateNeighborsAt(pos);
+            // Removed explicit level.updateNeighborsAt(pos) - setBlock handles it now
         }
     }
 
@@ -41,11 +43,13 @@ public class SimPistonMovingEntity {
         level.blockEntities.remove(pos);
 
         BlockState stateToPlace = isSourcePiston ? Blocks.AIR.defaultBlockState() : movedState;
-        level.setBlock(pos, stateToPlace);
+
+        // Vanilla uses flag 3 for finalTick block setting
+        level.setBlock(pos, stateToPlace, VirtualLevel.UPDATE_ALL | VirtualLevel.UPDATE_MOVED_BY_PISTON);
 
         if (stateToPlace.getBlock() instanceof PistonBaseBlock) {
             level.checkIfExtend(pos, stateToPlace);
         }
-        level.updateNeighborsAt(pos);
+        // Removed explicit level.updateNeighborsAt(pos) - setBlock handles it now
     }
 }
