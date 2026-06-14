@@ -61,14 +61,6 @@ public class VirtualLevel {
         for (currentTick = 0; currentTick < maxTicks; currentTick++) {
             boolean active = false;
 
-            currentPhase = "BLOCK ENTITIES";
-            List<SimPistonMovingEntity> tickingBEs = new ArrayList<>(blockEntities.values());
-            for (SimPistonMovingEntity be : tickingBEs) {
-                active = true;
-                be.tick(this);
-                flushNeighborUpdates();
-            }
-
             currentPhase = "BLOCK EVENTS";
             while (!blockEvents.isEmpty()) {
                 active = true;
@@ -77,6 +69,16 @@ public class VirtualLevel {
                 flushNeighborUpdates();
                 blockEvents.poll();
             }
+
+            currentPhase = "BLOCK ENTITIES";
+            List<SimPistonMovingEntity> tickingBEs = new ArrayList<>(blockEntities.values());
+            for (SimPistonMovingEntity be : tickingBEs) {
+                active = true;
+                be.tick(this);
+                flushNeighborUpdates();
+            }
+
+
 
             if (!active && blockEvents.isEmpty() && neighborUpdates.isEmpty()) {
                 log("§8Simulation settled. Halting early.");
