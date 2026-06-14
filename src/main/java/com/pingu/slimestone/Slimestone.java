@@ -31,10 +31,10 @@ public class Slimestone implements ModInitializer {
     private void runSimulation(ServerPlayer player, BlockPos targetPos) {
         player.sendSystemMessage(Component.literal("§a[Slimestone] Starting Virtual Simulation at " + targetPos.toShortString()));
         VirtualLevel level = new VirtualLevel(player);
-
-        for (int x = -8; x <= 8; x++) {
-            for (int y = -8; y <= 8; y++) {
-                for (int z = -8; z <= 8; z++) {
+        int r = 50;
+        for (int x = -r; x <= r; x++) {
+            for (int y = -r; y <= r; y++) {
+                for (int z = -r; z <= r; z++) {
                     BlockPos p = targetPos.offset(x, y, z);
                     level.setBlockRaw(p, player.level().getBlockState(p));
                 }

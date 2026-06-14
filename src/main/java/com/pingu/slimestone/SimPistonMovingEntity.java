@@ -12,7 +12,7 @@ public class SimPistonMovingEntity {
     Direction direction;
     boolean extending;
     boolean isSourcePiston;
-    float progress = 0.0f;
+    float progress = -0.5f;
 
     public SimPistonMovingEntity(BlockPos pos, BlockState movedState, Direction direction, boolean extending, boolean isSource) {
         this.pos = pos;

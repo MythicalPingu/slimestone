@@ -29,6 +29,14 @@ public class VirtualLevel {
     private int currentTick = 0;
     private String currentPhase = "INIT";
 
+    /**
+     * Pending scheduled block ticks ("tile ticks"), e.g. an Observer's
+     * falling-edge pulse. Ordered like vanilla's {@code ScheduledTick.DRAIN_ORDER}
+     * (earlier {@code triggerTick} first, ties broken by insertion order).
+     */
+    private final PriorityQueue<SimScheduledTick> scheduledBlockTicks = new PriorityQueue<>();
+    private long subTickOrderCounter = 0;
+
     public VirtualLevel(ServerPlayer player) {
         this.player = player;
     }
@@ -36,6 +44,7 @@ public class VirtualLevel {
     public void log(String msg) {
         String phaseColor = switch (currentPhase) {
             case "INIT" -> "§b";               // Aqua
+            case "TILE TICK" -> "§3";          // Dark Aqua
             case "BLOCK ENTITIES" -> "§e";     // Yellow
             case "BLOCK EVENTS" -> "§6";       // Gold
             case "NEIGHBOR UPDATES" -> "§d";   // Light Purple
@@ -53,14 +62,78 @@ public class VirtualLevel {
     }
 
     public void setBlock(BlockPos pos, BlockState state) {
+        BlockState oldState = getBlockState(pos);
         setBlockRaw(pos, state);
         log("Set block at " + pos.toShortString() + " to " + state.getBlock().getName().getString());
+        handleOnPlace(pos, state, oldState);
+    }
+    private void handleOnPlace(BlockPos pos, BlockState state, BlockState oldState) {
+        if (state.is(oldState.getBlock())) return;
+
+        // --- Observer Placement / Landing Logic ---
+        if (state.is(Blocks.OBSERVER)) {
+            boolean isPowered = state.getValue(BlockStateProperties.POWERED);
+            boolean hasPendingTick = hasScheduledTick(pos, Blocks.OBSERVER);
+
+            // 1. Vanilla ObserverBlock.onPlace: Reset spurious powered state if no tick is pending.
+            if (isPowered && !hasPendingTick) {
+                BlockState unpowered = state.setValue(BlockStateProperties.POWERED, false);
+                setBlockRaw(pos, unpowered);
+                log("§3[Observer] onPlace reset spurious POWERED state at " + pos.toShortString());
+                updateNeighborsFromObserver(pos, unpowered);
+                isPowered = false;
+            }
+
+            // 2. Vanilla Shape Update Execution
+            // Vanilla checks updateShape on all 6 sides immediately upon placement.
+            // An observer naturally "detects" the block in front of it during this check.
+            if (!isPowered && !hasPendingTick) {
+                scheduleTick(pos, Blocks.OBSERVER, 2);
+                log("§a[Observer] " + pos.toShortString() + " evaluated front shape upon landing → scheduling tick in 2 GT");
+            }
+        }
+    }
+    /**
+     * Returns true if there is already a pending tick for {@code (pos, type)}.
+     * Mirrors {@code LevelTickAccess.hasScheduledTick(pos, type)}.
+     */
+    public boolean hasScheduledTick(BlockPos pos, Block type) {
+        for (SimScheduledTick t : scheduledBlockTicks) {
+            if (t.type() == type && t.pos().equals(pos)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Queues a block tick to fire at {@code currentTick + delay}.
+     * Duplicate ticks (same pos+type) are silently ignored, matching vanilla's
+     * {@code startSignal} guard ({@code !ticks.getBlockTicks().hasScheduledTick(pos, this)}).
+     */
+    public void scheduleTick(BlockPos pos, Block type, int delay) {
+        if (hasScheduledTick(pos, type)) return;
+        long fireTick = currentTick + delay;
+        scheduledBlockTicks.add(new SimScheduledTick(pos.immutable(), type, fireTick, subTickOrderCounter++));
+        log("§3[Schedule] " + type.getName().getString()
+                + " at " + pos.toShortString()
+                + " → fires GT " + fireTick);
     }
 
     public void runTickLoop(int maxTicks) {
         for (currentTick = 0; currentTick < maxTicks; currentTick++) {
             boolean active = false;
 
+            // ── PHASE 1: TILE TICK (scheduled block ticks) ───────────────────
+            // Independent phase: drains every due tick (and its own neighbor
+            // updates) before BLOCK EVENTS even looks at the queue.
+            currentPhase = "TILE TICK";
+            while (!scheduledBlockTicks.isEmpty() && scheduledBlockTicks.peek().triggerTick() <= currentTick) {
+                active = true;
+                SimScheduledTick tick = scheduledBlockTicks.poll();
+                processScheduledTick(tick);
+                flushNeighborUpdates();
+            }
+
+            // ── PHASE 2: BLOCK EVENTS ─────────────────────────────────────────
             currentPhase = "BLOCK EVENTS";
             while (!blockEvents.isEmpty()) {
                 active = true;
@@ -70,6 +143,7 @@ public class VirtualLevel {
                 blockEvents.poll();
             }
 
+            // ── PHASE 3: BLOCK ENTITIES ────────────────────────────────────────
             currentPhase = "BLOCK ENTITIES";
             List<SimPistonMovingEntity> tickingBEs = new ArrayList<>(blockEntities.values());
             for (SimPistonMovingEntity be : tickingBEs) {
@@ -80,10 +154,68 @@ public class VirtualLevel {
 
 
 
-            if (!active && blockEvents.isEmpty() && neighborUpdates.isEmpty()) {
+            if (!active && blockEvents.isEmpty() && neighborUpdates.isEmpty() && scheduledBlockTicks.isEmpty()) {
                 log("§8Simulation settled. Halting early.");
                 break;
             }
+        }
+    }
+
+    /**
+     * Drains a single due tile tick. Mirrors {@code LevelTicks}: if the block
+     * at this position is no longer the type the tick was scheduled for, the
+     * tick is silently dropped instead of firing.
+     */
+    private void processScheduledTick(SimScheduledTick tick) {
+        BlockState state = getBlockState(tick.pos());
+
+        if (!state.is(tick.type())) {
+            log("§8[Tick] Cancelled stale " + tick.type().getName().getString()
+                    + " tick at " + tick.pos().toShortString() + " (block changed)");
+            return;
+        }
+
+        if (tick.type() == Blocks.OBSERVER) {
+            processObserverTick(tick.pos(), state);
+        }
+        // Other scheduled-tick block types (e.g. pistons, repeaters) would be
+        // dispatched here as the simulation grows to cover them.
+    }
+
+    private void processObserverTick(BlockPos pos, BlockState state) {
+        boolean wasPowered = state.getValue(BlockStateProperties.POWERED);
+
+        if (wasPowered) {
+            // ── Rising edge complete: turn off
+            BlockState unpowered = state.setValue(BlockStateProperties.POWERED, false);
+            // Use setBlockRaw so we don't accidentally re-trigger placement shape updates
+            setBlockRaw(pos, unpowered);
+            log("§3[Observer] " + pos.toShortString() + " → POWERED=false (pulse end)");
+            updateNeighborsFromObserver(pos, unpowered);
+        } else {
+            // ── Pulse start: turn on, schedule turn-off
+            BlockState powered = state.setValue(BlockStateProperties.POWERED, true);
+            setBlockRaw(pos, powered);
+            log("§3[Observer] " + pos.toShortString() + " → POWERED=true (pulse start)");
+
+            // Schedule the falling edge 2 GT from now
+            scheduleTick(pos, Blocks.OBSERVER, 2);
+            updateNeighborsFromObserver(pos, powered);
+        }
+    }
+
+    private void updateNeighborsFromObserver(BlockPos obsPos, BlockState obsState) {
+        Direction facing = obsState.getValue(BlockStateProperties.FACING);
+        BlockPos outputPos = obsPos.relative(facing.getOpposite());
+
+        // 1. Emulate vanilla neighborChanged for the output block directly.
+        neighborUpdates.add(new NeighborUpdate(outputPos, obsPos));
+
+        // 2. Emulate updateNeighborsAtExceptFromFacing.
+        for (Direction dir : UPDATE_ORDER) {
+            // Skip the direction pointing back at the observer
+            if (dir == facing) continue;
+            neighborUpdates.add(new NeighborUpdate(outputPos.relative(dir), outputPos));
         }
     }
 
@@ -143,8 +275,12 @@ public class VirtualLevel {
 
             if (lookingAt.equals(fromPos)) {
                 log("§a[Observer] Shape update detected at " + pos.toShortString() + " from source " + fromPos.toShortString());
-                // Note: In a full simulation, you would check if !(Boolean)state.getValue(POWERED)
-                // and then queue a block tick using this.startSignal() here.
+
+                // ObserverBlock.updateShape -> startSignal: only schedules a
+                // pulse if currently unpowered and nothing is already pending.
+                if (!state.getValue(BlockStateProperties.POWERED) && !hasScheduledTick(pos, Blocks.OBSERVER)) {
+                    scheduleTick(pos, Blocks.OBSERVER, 2);
+                }
             }
         }
 
@@ -182,19 +318,80 @@ public class VirtualLevel {
         }
     }
 
+    /**
+     * Mirrors {@code PistonBaseBlock.getNeighborSignal}: checks every neighbour
+     * of the piston (except the one it's facing) for a redstone signal, the
+     * position directly above (covered explicitly so an UP-facing piston still
+     * sees it, since the main loop skips its own facing direction), and the
+     * quasi-connectivity (QC) positions around the block above the piston.
+     */
     public boolean hasRedstoneBlockPower(BlockPos pos, Direction pistonFacing) {
+        // ── Loop 1: Direct neighbours (all sides except the piston's push face)
         for (Direction dir : Direction.values()) {
             if (dir == pistonFacing) continue;
-            if (getBlockState(pos.relative(dir)).is(Blocks.REDSTONE_BLOCK)) return true;
+            if (simHasSignal(pos.relative(dir), dir)) return true;
         }
 
+        // ── Loop 2: QC — neighbours of the block above (all sides except below)
         BlockPos above = pos.above();
         for (Direction dir : Direction.values()) {
             if (dir == Direction.DOWN) continue;
-            if (getBlockState(above.relative(dir)).is(Blocks.REDSTONE_BLOCK)) return true;
+            if (simHasSignal(above.relative(dir), dir)) return true;
         }
 
         return false;
+    }
+
+    /**
+     * Mirrors {@code LevelReader.hasSignal}: true if the block at
+     * {@code blockPos} either directly emits a signal toward {@code queryDir},
+     * or — for a solid conductor — re-emits a direct ("strong") signal it's
+     * receiving from one of its own neighbours.
+     */
+    private boolean simHasSignal(BlockPos blockPos, Direction queryDir) {
+        BlockState state = getBlockState(blockPos);
+
+        if (state.is(Blocks.REDSTONE_BLOCK)) return true;
+
+        // Vanilla logic: An observer emits signal 15 if powered AND its FACING matches the queried direction.
+        if (state.is(Blocks.OBSERVER)
+                && state.getValue(BlockStateProperties.POWERED)
+                && state.getValue(BlockStateProperties.FACING) == queryDir) {
+            return true;
+        }
+
+        // Solid conductors re-emit direct (strong) signals from their neighbours.
+        if (isSimRedstoneConductor(state)) {
+            return simGetDirectSignalTo(blockPos) > 0;
+        }
+
+        return false;
+    }
+    private boolean isSimRedstoneConductor(BlockState state) {
+        if (state.isAir()) return false;
+        if (state.is(Blocks.REDSTONE_BLOCK)) return false;
+        if (state.is(Blocks.OBSERVER)) return false;
+        if (state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON)) return false;
+        if (state.is(Blocks.PISTON_HEAD) || state.is(Blocks.MOVING_PISTON)) return false;
+        if (state.is(Blocks.HONEY_BLOCK)) return false; // Slime blocks are solid blocks unlike honey
+        return true;
+    }
+
+    private int simGetDirectSignalTo(BlockPos blockPos) {
+        for (Direction dir : Direction.values()) {
+            BlockPos neighborPos = blockPos.relative(dir);
+            BlockState neighborState = getBlockState(neighborPos);
+
+
+
+            // Ensure strong power is checked from adjacent observers
+            if (neighborState.is(Blocks.OBSERVER)
+                    && neighborState.getValue(BlockStateProperties.POWERED)
+                    && neighborState.getValue(BlockStateProperties.FACING) == dir) {
+                return 15;
+            }
+        }
+        return 0;
     }
 
     public void checkIfExtend(BlockPos pos, BlockState state) {
