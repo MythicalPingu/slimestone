@@ -9,6 +9,7 @@ import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.piston.PistonHeadBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.block.state.properties.NoteBlockInstrument;
 import net.minecraft.world.level.block.state.properties.PistonType;
 import net.minecraft.world.level.material.PushReaction;
 
@@ -288,8 +289,13 @@ public class VirtualLevel {
 
     private void handleNeighborUpdate(BlockPos pos, BlockState state, BlockPos fromPos) {
 
+        // --- NOTE BLOCK ---
+        if (state.is(Blocks.NOTE_BLOCK)) {
+            handleNoteBlockNeighborChanged(pos, state);
+        }
+
         // --- EXISTING PISTON LOGIC ---
-        if (state.getBlock() instanceof PistonBaseBlock) {
+        else if (state.getBlock() instanceof PistonBaseBlock) {
             checkIfExtend(pos, state);
         } else if (state.getBlock() instanceof PistonHeadBlock) {
             Direction facing = state.getValue(PistonHeadBlock.FACING);
@@ -343,6 +349,20 @@ public class VirtualLevel {
                         scheduleTick(neighborPos, Blocks.OBSERVER, 2);
                     }
                 }
+            } else if (state.is(Blocks.NOTE_BLOCK)) {
+                // NoteBlock.updateShape only acts on Y-axis neighbours (INSTRUMENT change).
+                // In vanilla, directionToNeighbour is the direction FROM the note block TO
+                // the changed block, which here is dir.getOpposite(). Axis.Y covers both
+                // UP and DOWN, so dir.getAxis() == Y is equivalent.
+                if (dir.getAxis() == Direction.Axis.Y) {
+                    BlockState updated = simSetNoteBlockInstrument(neighborPos, state);
+                    if (updated != state) {
+                        setBlockRaw(neighborPos, updated);
+                        log("§a[NoteBlock] Instrument updated at " + neighborPos.toShortString()
+                                + " → " + updated.getValue(BlockStateProperties.NOTEBLOCK_INSTRUMENT).name());
+                    }
+                }
+                // Non-Y directions fall through super.updateShape, which is a no-op for NoteBlock.
             }
         }
 
@@ -425,6 +445,69 @@ public class VirtualLevel {
         return 0;
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // NOTE BLOCK
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Mirrors {@code Level.hasNeighborSignal}: returns true if any of the six
+     * immediate neighbours of {@code pos} emits a redstone signal toward it.
+     *
+     * Unlike {@link #hasRedstoneBlockPower} this checks all six faces with no
+     * facing exclusion and no quasi-connectivity (QC), matching the call
+     * {@code level.hasNeighborSignal(pos)} inside NoteBlock.neighborChanged.
+     */
+    public boolean simHasNeighborSignal(BlockPos pos) {
+        for (Direction dir : Direction.values()) {
+            if (simHasSignal(pos.relative(dir), dir)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Mirrors {@code NoteBlock.neighborChanged}: toggles POWERED when the
+     * incoming signal level changes. Sound / blockEvent logic is intentionally
+     * skipped — it queues a blockEvent that only plays audio and has zero
+     * redstone consequence.
+     *
+     * Vanilla call order on a rising edge:
+     *   1. playNote → level.blockEvent (audio, skipped here)
+     *   2. level.setBlock(pos, powered=true, flag 3)
+     *
+     * On a falling edge only step 2 occurs (no sound on power loss).
+     * We replicate both orderings faithfully minus the audio.
+     */
+    private void handleNoteBlockNeighborChanged(BlockPos pos, BlockState state) {
+        boolean signal   = simHasNeighborSignal(pos);
+        boolean wasPowered = state.getValue(BlockStateProperties.POWERED);
+        if (signal == wasPowered) return;
+
+        log("§a[NoteBlock] " + pos.toShortString() + " → POWERED=" + signal);
+        // flag 3 = UPDATE_ALL (UPDATE_NEIGHBORS | UPDATE_CLIENTS), matching vanilla
+        setBlock(pos, state.setValue(BlockStateProperties.POWERED, signal), UPDATE_ALL);
+    }
+
+    /**
+     * Mirrors the private {@code NoteBlock.setInstrument}: reads the blocks
+     * immediately above and below {@code pos} and returns a new state carrying
+     * the correct INSTRUMENT. Called only when a Y-axis neighbour changes shape.
+     *
+     * Rule (from vanilla):
+     *   • If the block ABOVE has an instrument that works above a note block
+     *     (e.g. a skull), use that instrument.
+     *   • Otherwise fall back to the block BELOW's instrument, but if the
+     *     block below itself worksAboveNoteBlock, use HARP as default instead.
+     */
+    private BlockState simSetNoteBlockInstrument(BlockPos pos, BlockState state) {
+        NoteBlockInstrument above = getBlockState(pos.above()).instrument();
+        if (above.worksAboveNoteBlock()) {
+            return state.setValue(BlockStateProperties.NOTEBLOCK_INSTRUMENT, above);
+        }
+        NoteBlockInstrument below  = getBlockState(pos.below()).instrument();
+        NoteBlockInstrument result = below.worksAboveNoteBlock() ? NoteBlockInstrument.HARP : below;
+        return state.setValue(BlockStateProperties.NOTEBLOCK_INSTRUMENT, result);
+    }
+
     public void checkIfExtend(BlockPos pos, BlockState state) {
         Direction facing = state.getValue(PistonBaseBlock.FACING);
         boolean powered = hasRedstoneBlockPower(pos, facing);
@@ -470,6 +553,7 @@ public class VirtualLevel {
             moveBlocks(pos, currentState, facing, true, resolver);
             boolean extendIsSticky = currentState.getBlock() == Blocks.STICKY_PISTON;
             setBlockRaw(pos, currentState.setValue(PistonBaseBlock.EXTENDED, true));
+            fireShapeUpdates(pos);
 
             log("Set block at " + pos.toShortString() + " to "
                     + (extendIsSticky ? "Sticky Piston Headless Base" : "Piston Headless Base"));
@@ -501,6 +585,7 @@ public class VirtualLevel {
 
             setBlockRaw(pos, movingBaseState);
             blockEntities.put(pos, new SimPistonMovingEntity(pos, unextendedBase, facing, false, true));
+            fireShapeUpdates(pos); // Add this line
             log("Created MovingPiston BE at " + pos.toShortString() + " for Retracting "
                     + (isSticky ? "Sticky " : "") + "Base");
             //log("Firing neighbor updates for retracting base at: " + pos.toShortString());
@@ -633,6 +718,7 @@ public class VirtualLevel {
 
         for (BlockPos p : vacatedSpots.keySet()) {
             setBlockRaw(p, Blocks.AIR.defaultBlockState());
+            fireShapeUpdates(p);
         }
 
         for (int i = toPush.size() - 1; i >= 0; i--) {
