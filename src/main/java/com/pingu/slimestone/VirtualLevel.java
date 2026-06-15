@@ -126,8 +126,8 @@ public class VirtualLevel {
         // Emulates a placed block running its own shape checks against neighbors upon landing
         if (state.is(Blocks.OBSERVER)) {
             if (!state.getValue(BlockStateProperties.POWERED) && !hasScheduledTick(pos, Blocks.OBSERVER)) {
+                log("§3[Schedule] Observer at " + pos.toShortString() + " → fires next tick");
                 scheduleTick(pos, Blocks.OBSERVER, 2);
-                log("§a[Observer] " + pos.toShortString() + " evaluated front shape upon landing → scheduling tick in 2 GT");
             }
         }
     }
@@ -151,9 +151,9 @@ public class VirtualLevel {
         if (hasScheduledTick(pos, type)) return;
         long fireTick = currentTick + delay;
         scheduledBlockTicks.add(new SimScheduledTick(pos.immutable(), type, fireTick, subTickOrderCounter++));
-        log("§3[Schedule] " + type.getName().getString()
-                + " at " + pos.toShortString()
-                + " → fires GT " + fireTick);
+        // Removed the universal log here.
+        // This stops the simulator from logging self-reschedules (like turn-off ticks),
+        // perfectly mirroring how vanilla's level.scheduleTick() avoids the startSignal Mixin.
     }
 
     public void runTickLoop(int maxTicks) {
@@ -237,11 +237,9 @@ public class VirtualLevel {
             setBlockRaw(pos, powered);
             log("§3[Observer] " + pos.toShortString() + " → POWERED=true (pulse start)");
 
-            scheduleTick(pos, Blocks.OBSERVER, 2);
+            fireShapeUpdates(pos);                   // neighbor cascade first, like vanilla setBlock
+            scheduleTick(pos, Blocks.OBSERVER, 2);   // self-reschedule second, like vanilla's scheduleTick after setBlock
 
-            // 1. Emit Shape Updates to immediate neighbors
-            fireShapeUpdates(pos);
-            // 2. Emit Redstone Updates to the back block and its neighbors
             updateNeighborsFromObserver(pos, powered);
         }
     }
@@ -332,14 +330,16 @@ public class VirtualLevel {
             BlockState state = getBlockState(neighborPos);
 
             if (state.is(Blocks.OBSERVER)) {
+                // Emulate the Mixin's updateShape logging exactly
+                log("§6[ShapeUpdate] Detected update from " + dir.getOpposite().getName() + " side at " + neighborPos.toShortString());
+
                 Direction facing = state.getValue(BlockStateProperties.FACING);
                 BlockPos lookingAt = neighborPos.relative(facing);
 
                 if (lookingAt.equals(pos)) {
-                    log("§a[Observer] Shape update detected at " + neighborPos.toShortString() + " from source " + pos.toShortString());
-
-                    // Move the scheduling guard here:
+                    // This block matches vanilla's startSignal behavior
                     if (!state.getValue(BlockStateProperties.POWERED) && !hasScheduledTick(neighborPos, Blocks.OBSERVER)) {
+                        log("§3[Schedule] Observer at " + neighborPos.toShortString() + " → fires next tick");
                         scheduleTick(neighborPos, Blocks.OBSERVER, 2);
                     }
                 }

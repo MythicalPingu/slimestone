@@ -1,9 +1,10 @@
 {
 	"required": true,
-	"package": "",
+	"package": "com.pingu.slimestone.mixin",
 	"compatibilityLevel": "JAVA_21",
-	"mixins": [],
-	"client": [],
+	"mixins": [
+		"ObserverBlockMixin"
+	],
 	"injectors": {
 		"defaultRequire": 1
 	}
