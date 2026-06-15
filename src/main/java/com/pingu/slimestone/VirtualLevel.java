@@ -147,18 +147,11 @@ public class VirtualLevel {
         return false;
     }
 
-    /**
-     * Queues a block tick to fire at {@code currentTick + delay}.
-     * Duplicate ticks (same pos+type) are silently ignored, matching vanilla's
-     * {@code startSignal} guard ({@code !ticks.getBlockTicks().hasScheduledTick(pos, this)}).
-     */
     public void scheduleTick(BlockPos pos, Block type, int delay) {
         if (hasScheduledTick(pos, type)) return;
         long fireTick = currentTick + delay;
         scheduledBlockTicks.add(new SimScheduledTick(pos.immutable(), type, fireTick, subTickOrderCounter++));
-        // Removed the universal log here.
-        // This stops the simulator from logging self-reschedules (like turn-off ticks),
-        // perfectly mirroring how vanilla's level.scheduleTick() avoids the startSignal Mixin.
+
     }
 
     public void runTickLoop(int maxTicks) {
@@ -166,12 +159,17 @@ public class VirtualLevel {
             boolean active = false;
 
             // ── PHASE 1: TILE TICK (scheduled block ticks) ───────────────────
-            // Independent phase: drains every due tick (and its own neighbor
-            // updates) before BLOCK EVENTS even looks at the queue.
-            currentPhase = "TILE TICK";
+// 1. Drain all ticks for the current gametick
+            List<SimScheduledTick> currentlyTicking = new ArrayList<>();
             while (!scheduledBlockTicks.isEmpty() && scheduledBlockTicks.peek().triggerTick() <= currentTick) {
+                currentlyTicking.add(scheduledBlockTicks.poll());
+            }
+
+// 2. Process them.
+// Because they are no longer in scheduledBlockTicks, hasScheduledTick()
+// will accurately return false, replicating vanilla's blind spot!
+            for (SimScheduledTick tick : currentlyTicking) {
                 active = true;
-                SimScheduledTick tick = scheduledBlockTicks.poll();
                 processScheduledTick(tick);
                 flushNeighborUpdates();
             }
@@ -204,11 +202,6 @@ public class VirtualLevel {
         }
     }
 
-    /**
-     * Drains a single due tile tick. Mirrors {@code LevelTicks}: if the block
-     * at this position is no longer the type the tick was scheduled for, the
-     * tick is silently dropped instead of firing.
-     */
     private void processScheduledTick(SimScheduledTick tick) {
         BlockState state = getBlockState(tick.pos());
 
@@ -221,8 +214,6 @@ public class VirtualLevel {
         if (tick.type() == Blocks.OBSERVER) {
             processObserverTick(tick.pos(), state);
         }
-        // Other scheduled-tick block types (e.g. pistons, repeaters) would be
-        // dispatched here as the simulation grows to cover them.
     }
 
     private void processObserverTick(BlockPos pos, BlockState state) {
@@ -328,10 +319,7 @@ public class VirtualLevel {
                     }
                 }
             } else if (state.is(Blocks.NOTE_BLOCK)) {
-                // NoteBlock.updateShape only acts on Y-axis neighbours (INSTRUMENT change).
-                // In vanilla, directionToNeighbour is the direction FROM the note block TO
-                // the changed block, which here is dir.getOpposite(). Axis.Y covers both
-                // UP and DOWN, so dir.getAxis() == Y is equivalent.
+
                 if (dir.getAxis() == Direction.Axis.Y) {
                     BlockState updated = simSetNoteBlockInstrument(neighborPos, state);
                     if (updated != state) {
@@ -347,13 +335,6 @@ public class VirtualLevel {
         currentPhase = previousPhase;
     }
 
-    /**
-     * Mirrors {@code PistonBaseBlock.getNeighborSignal}: checks every neighbour
-     * of the piston (except the one it's facing) for a redstone signal, the
-     * position directly above (covered explicitly so an UP-facing piston still
-     * sees it, since the main loop skips its own facing direction), and the
-     * quasi-connectivity (QC) positions around the block above the piston.
-     */
     public boolean hasRedstoneBlockPower(BlockPos pos, Direction pistonFacing) {
         // ── Loop 1: Direct neighbours (all sides except the piston's push face)
         for (Direction dir : Direction.values()) {
@@ -371,12 +352,6 @@ public class VirtualLevel {
         return false;
     }
 
-    /**
-     * Mirrors {@code LevelReader.hasSignal}: true if the block at
-     * {@code blockPos} either directly emits a signal toward {@code queryDir},
-     * or — for a solid conductor — re-emits a direct ("strong") signal it's
-     * receiving from one of its own neighbours.
-     */
     private boolean simHasSignal(BlockPos blockPos, Direction queryDir) {
         BlockState state = getBlockState(blockPos);
 
@@ -427,14 +402,6 @@ public class VirtualLevel {
     // NOTE BLOCK
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Mirrors {@code Level.hasNeighborSignal}: returns true if any of the six
-     * immediate neighbours of {@code pos} emits a redstone signal toward it.
-     *
-     * Unlike {@link #hasRedstoneBlockPower} this checks all six faces with no
-     * facing exclusion and no quasi-connectivity (QC), matching the call
-     * {@code level.hasNeighborSignal(pos)} inside NoteBlock.neighborChanged.
-     */
     public boolean simHasNeighborSignal(BlockPos pos) {
         for (Direction dir : Direction.values()) {
             if (simHasSignal(pos.relative(dir), dir)) return true;
@@ -442,19 +409,6 @@ public class VirtualLevel {
         return false;
     }
 
-    /**
-     * Mirrors {@code NoteBlock.neighborChanged}: toggles POWERED when the
-     * incoming signal level changes. Sound / blockEvent logic is intentionally
-     * skipped — it queues a blockEvent that only plays audio and has zero
-     * redstone consequence.
-     *
-     * Vanilla call order on a rising edge:
-     *   1. playNote → level.blockEvent (audio, skipped here)
-     *   2. level.setBlock(pos, powered=true, flag 3)
-     *
-     * On a falling edge only step 2 occurs (no sound on power loss).
-     * We replicate both orderings faithfully minus the audio.
-     */
     private void handleNoteBlockNeighborChanged(BlockPos pos, BlockState state) {
         boolean signal   = simHasNeighborSignal(pos);
         boolean wasPowered = state.getValue(BlockStateProperties.POWERED);
@@ -465,17 +419,6 @@ public class VirtualLevel {
         setBlock(pos, state.setValue(BlockStateProperties.POWERED, signal), UPDATE_ALL);
     }
 
-    /**
-     * Mirrors the private {@code NoteBlock.setInstrument}: reads the blocks
-     * immediately above and below {@code pos} and returns a new state carrying
-     * the correct INSTRUMENT. Called only when a Y-axis neighbour changes shape.
-     *
-     * Rule (from vanilla):
-     *   • If the block ABOVE has an instrument that works above a note block
-     *     (e.g. a skull), use that instrument.
-     *   • Otherwise fall back to the block BELOW's instrument, but if the
-     *     block below itself worksAboveNoteBlock, use HARP as default instead.
-     */
     private BlockState simSetNoteBlockInstrument(BlockPos pos, BlockState state) {
         NoteBlockInstrument above = getBlockState(pos.above()).instrument();
         if (above.worksAboveNoteBlock()) {
