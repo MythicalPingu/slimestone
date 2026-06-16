@@ -214,6 +214,8 @@ public class VirtualLevel {
 
         if (tick.type() == Blocks.OBSERVER) {
             processObserverTick(tick.pos(), state);
+        } else if (tick.type() == Blocks.REDSTONE_LAMP) {
+            processRedstoneLampTick(tick.pos(), state);
         }
     }
 
@@ -288,6 +290,11 @@ public class VirtualLevel {
         // --- NOTE BLOCK ---
         if (state.is(Blocks.NOTE_BLOCK)) {
             handleNoteBlockNeighborChanged(pos, state);
+        }
+
+        // --- REDSTONE LAMP ---
+        else if (state.is(Blocks.REDSTONE_LAMP)) {
+            handleRedstoneLampNeighborChanged(pos, state);
         }
 
         // --- TRAPDOOR ---
@@ -434,6 +441,52 @@ public class VirtualLevel {
         NoteBlockInstrument below  = getBlockState(pos.below()).instrument();
         NoteBlockInstrument result = below.worksAboveNoteBlock() ? NoteBlockInstrument.HARP : below;
         return state.setValue(BlockStateProperties.NOTEBLOCK_INSTRUMENT, result);
+    }
+
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // REDSTONE LAMP
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Mirrors {@code RedstoneLampBlock.neighborChanged}.
+     * <p>
+     * Turn-on is immediate (flag 2 → shape updates, no neighbor updates).
+     * Turn-off is deferred: a 4-tick scheduled tick is queued, and the tick
+     * re-checks power before actually switching off.
+     */
+    private void handleRedstoneLampNeighborChanged(BlockPos pos, BlockState state) {
+        boolean isLit  = state.getValue(BlockStateProperties.LIT);
+        boolean signal = simHasNeighborSignal(pos);
+        if (isLit == signal) return;
+
+        if (isLit) {
+            // Signal lost — schedule a delayed turn-off (vanilla: 4 game-ticks).
+            // hasScheduledTick guard inside scheduleTick prevents duplicates.
+            log("§c[Lamp] " + pos.toShortString() + " → turn-off scheduled in 4t");
+            scheduleTick(pos, Blocks.REDSTONE_LAMP, 4);
+        } else {
+            // Signal arrived — turn on immediately.
+            log("§c[Lamp] " + pos.toShortString() + " → LIT=true");
+            // Flag 2 = UPDATE_CLIENTS: fires shape updates but NOT neighbor updates,
+            // matching vanilla's setBlock(pos, state.cycle(LIT), 2).
+            setBlock(pos, state.setValue(BlockStateProperties.LIT, true), UPDATE_CLIENTS);
+        }
+    }
+
+    /**
+     * Mirrors {@code RedstoneLampBlock.tick}.
+     * <p>
+     * Called 4 ticks after power was lost. Only turns off if the lamp is still
+     * lit AND still has no signal — power may have returned during the delay.
+     */
+    private void processRedstoneLampTick(BlockPos pos, BlockState state) {
+        if (state.getValue(BlockStateProperties.LIT) && !simHasNeighborSignal(pos)) {
+            log("§c[Lamp] " + pos.toShortString() + " → LIT=false (4t delay elapsed)");
+            setBlock(pos, state.setValue(BlockStateProperties.LIT, false), UPDATE_CLIENTS);
+        } else {
+            log("§8[Lamp] " + pos.toShortString() + " → turn-off tick no-op (still powered or already unlit)");
+        }
     }
 
 
