@@ -5,6 +5,7 @@ import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.piston.PistonHeadBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -289,6 +290,11 @@ public class VirtualLevel {
             handleNoteBlockNeighborChanged(pos, state);
         }
 
+        // --- TRAPDOOR ---
+        else if (state.getBlock() instanceof TrapDoorBlock) {
+            handleTrapDoorNeighborChanged(pos, state);
+        }
+
         // --- PISTON LOGIC (delegated to PistonMechanics) ---
         else if (state.getBlock() instanceof PistonBaseBlock) {
             pistonMechanics.checkIfExtend(pos, state);
@@ -378,6 +384,7 @@ public class VirtualLevel {
         if (state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON)) return false;
         if (state.is(Blocks.PISTON_HEAD) || state.is(Blocks.MOVING_PISTON)) return false;
         if (state.is(Blocks.HONEY_BLOCK)) return false; // Slime blocks are solid blocks unlike honey
+        if (state.getBlock() instanceof TrapDoorBlock) return false; // Trapdoors are not solid
         return true;
     }
 
@@ -427,6 +434,37 @@ public class VirtualLevel {
         NoteBlockInstrument below  = getBlockState(pos.below()).instrument();
         NoteBlockInstrument result = below.worksAboveNoteBlock() ? NoteBlockInstrument.HARP : below;
         return state.setValue(BlockStateProperties.NOTEBLOCK_INSTRUMENT, result);
+    }
+
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TRAPDOOR
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Mirrors {@code TrapDoorBlock.neighborChanged}.
+     * <p>
+     * All trapdoors are treated as iron trapdoors (redstone-only), so OPEN
+     * always tracks POWERED. Vanilla calls
+     * {@code level.setBlock(pos, newState, 2)} — flag 2 is UPDATE_CLIENTS,
+     * which (in our setBlock) fires shape updates but NOT neighbor updates.
+     */
+    private void handleTrapDoorNeighborChanged(BlockPos pos, BlockState state) {
+        boolean signal    = simHasNeighborSignal(pos);
+        boolean wasPowered = state.getValue(BlockStateProperties.POWERED);
+        if (signal == wasPowered) return;
+
+        BlockState newState = state
+                .setValue(BlockStateProperties.POWERED, signal)
+                .setValue(BlockStateProperties.OPEN,    signal);
+
+        log("§9[TrapDoor] " + pos.toShortString()
+                + " → POWERED=" + signal + ", OPEN=" + signal);
+
+        // Flag 2 = UPDATE_CLIENTS only.
+        // setBlock will fire shape updates (bit 16 not set → shape updates run)
+        // but NOT neighbor updates (bit 1 not set), matching vanilla exactly.
+        setBlock(pos, newState, UPDATE_CLIENTS);
     }
 
 
