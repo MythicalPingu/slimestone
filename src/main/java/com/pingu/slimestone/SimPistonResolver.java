@@ -45,6 +45,11 @@ public class SimPistonResolver {
 
         if (startState.isAir()) return true;
 
+        // Sticky pistons cannot pull glazed terracotta or unpushable blocks. They gracefully retract empty.
+        if (!extending && (isGlazedTerracotta(startState) || !isPushable(startState, pushDirection, startPos))) {
+            return true;
+        }
+
         if (!isPushable(startState, pushDirection, startPos)) {
             if (extending && startState.getPistonPushReaction() == PushReaction.DESTROY) {
                 toDestroy.add(startPos);
@@ -74,7 +79,16 @@ public class SimPistonResolver {
         while (isSticky(state)) {
             BlockPos next = pos.relative(pushDirection.getOpposite(), count);
             BlockState nextState = level.getBlockState(next);
+
             if (nextState.isAir() || !canStickToEachOther(state, nextState) || next.equals(pistonPos)) break;
+
+            // Prevent attempting to drag unpushable blocks (e.g. block entities) backward
+            if (!isPushable(nextState, pushDirection, next)) {
+                this.failurePos = next;
+                this.failureReason = "Cannot drag unpushable block at " + next.toShortString();
+                return false;
+            }
+
             state = nextState;
             count++;
             if (count + toPush.size() > 12) {
@@ -172,6 +186,41 @@ public class SimPistonResolver {
     private boolean canStickToEachOther(BlockState state1, BlockState state2) {
         if (state1.is(Blocks.HONEY_BLOCK) && state2.is(Blocks.SLIME_BLOCK)) return false;
         if (state1.is(Blocks.SLIME_BLOCK) && state2.is(Blocks.HONEY_BLOCK)) return false;
+
+        // Slime blocks slide past Glazed Terracotta
+        if (isGlazedTerracotta(state1) || isGlazedTerracotta(state2)) return false;
+
+        // Slime blocks slide past immovable blocks or blocks that break (like Tall Grass)
+        if (!canBeDragged(state1) || !canBeDragged(state2)) return false;
+
         return isSticky(state1) || isSticky(state2);
+    }
+
+    // --- Helper Methods ---
+
+    private boolean canBeDragged(BlockState state) {
+        if (state.isAir() || state.is(Blocks.OBSIDIAN) || state.is(Blocks.CRYING_OBSIDIAN) ||
+                state.is(Blocks.RESPAWN_ANCHOR) || state.is(Blocks.REINFORCED_DEEPSLATE) || state.is(Blocks.BEDROCK)) {
+            return false;
+        }
+        PushReaction reaction = state.getPistonPushReaction();
+        if (reaction == PushReaction.BLOCK && !state.is(Blocks.PISTON) && !state.is(Blocks.STICKY_PISTON)) {
+            return false;
+        }
+        if (reaction == PushReaction.DESTROY) {
+            return false;
+        }
+        return true;
+    }
+
+    private boolean isGlazedTerracotta(BlockState state) {
+        return state.is(Blocks.WHITE_GLAZED_TERRACOTTA) || state.is(Blocks.ORANGE_GLAZED_TERRACOTTA) ||
+                state.is(Blocks.MAGENTA_GLAZED_TERRACOTTA) || state.is(Blocks.LIGHT_BLUE_GLAZED_TERRACOTTA) ||
+                state.is(Blocks.YELLOW_GLAZED_TERRACOTTA) || state.is(Blocks.LIME_GLAZED_TERRACOTTA) ||
+                state.is(Blocks.PINK_GLAZED_TERRACOTTA) || state.is(Blocks.GRAY_GLAZED_TERRACOTTA) ||
+                state.is(Blocks.LIGHT_GRAY_GLAZED_TERRACOTTA) || state.is(Blocks.CYAN_GLAZED_TERRACOTTA) ||
+                state.is(Blocks.PURPLE_GLAZED_TERRACOTTA) || state.is(Blocks.BLUE_GLAZED_TERRACOTTA) ||
+                state.is(Blocks.BROWN_GLAZED_TERRACOTTA) || state.is(Blocks.GREEN_GLAZED_TERRACOTTA) ||
+                state.is(Blocks.RED_GLAZED_TERRACOTTA) || state.is(Blocks.BLACK_GLAZED_TERRACOTTA);
     }
 }

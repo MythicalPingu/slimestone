@@ -25,10 +25,20 @@ public class ObserverBlockMixin {
     private static Long startTick = null;
 
     @Unique
+    private static Long lastEventTick = null;
+
+    @Unique
     private void log(Level level, String message) {
         if (level instanceof ServerLevel serverLevel) {
             long currentTick = serverLevel.getGameTime();
-            if (startTick == null) startTick = currentTick;
+
+            // If it's been more than 5 ticks since the last observer event,
+            // assume it's a new player action/sequence and reset the counter.
+            if (lastEventTick == null || (currentTick - lastEventTick) > 10) {
+                startTick = currentTick;
+            }
+
+            lastEventTick = currentTick;
             long gt = currentTick - startTick;
 
             // Format: [GT X] Message
@@ -58,7 +68,7 @@ public class ObserverBlockMixin {
     }
 
     // 3. Shape Update Logic
-// 4. Trigger: Receiving shape update (Gold)
+    // 4. Trigger: Receiving shape update (Gold)
     @Inject(method = "updateShape", at = @At("HEAD"))
     private void onUpdateShape(BlockState state, LevelReader level, ScheduledTickAccess tickAccess,
                                BlockPos pos, Direction direction, BlockPos neighborPos,
@@ -66,14 +76,10 @@ public class ObserverBlockMixin {
 
         if (level instanceof Level lvl) {
             // 'direction' here is the direction FROM the observer TO the neighbor
-            // 'direction' is the parameter you asked about!
             String side = direction.getName();
 
             // This logs which side of the observer received the update
             log(lvl, "§6[ShapeUpdate] Detected update from " + side + " side at " + neighborPos.toShortString());
-
-            // If you want to know if it's the front:
-            // if (direction == state.getValue(ObserverBlock.FACING)) { ... }
         }
     }
 }

@@ -97,6 +97,6 @@ public class Slimestone implements ModInitializer {
             return;
         }
 
-        level.runTickLoop(100);
+        level.runTickLoop(1000);
     }
 }
