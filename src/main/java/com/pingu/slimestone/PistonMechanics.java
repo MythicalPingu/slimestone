@@ -75,7 +75,26 @@ public class PistonMechanics {
             }
         }
     }
+    private void fireObserverRemovalUpdate(BlockPos pos, BlockState oldState) {
+        if (oldState == null) return;
+        if (!oldState.is(Blocks.OBSERVER)) return;
 
+        // Condition 1 – observer must be in its powered/lit state.
+        if (!oldState.getValue(BlockStateProperties.POWERED)) return;
+
+        // Condition 2 – the turn-off tick must still be pending, confirming the
+        // observer is in its live pulse window (powered on, but not yet ticked off).
+        // Mirrors affectNeighborsAfterRemoval's hasScheduledTick gate.
+        // Note: toDestroy blocks never need this path — observers are movable, so
+        // the resolver always puts them in toPush, never toDestroy. We only call
+        // this for pushed blocks (toPush loop below), matching vanilla's behaviour.
+        if (!level.hasScheduledTick(pos, Blocks.OBSERVER)) return;
+
+        BlockPos outputPos = pos.relative(oldState.getValue(BlockStateProperties.FACING).getOpposite());
+        level.log("§b[Observer] Powered observer removed at " + pos.toShortString()
+                + ", instant update → " + outputPos.toShortString());
+        level.updateNeighborsFromObserver(pos, oldState);
+    }
     /**
      * Mirrors the piston-head half of {@code PistonHeadBlock.neighborChanged}
      * (via {@code canSurvive}): if the head no longer has a fitting,
@@ -285,6 +304,7 @@ public class PistonMechanics {
         for (BlockPos p : toPush) {
             vacatedSpots.put(p, level.getBlockState(p));
         }
+        Map<BlockPos, BlockState> oldPushStates = new HashMap<>(vacatedSpots);
 
         Direction moveDir = extending ? dir : dir.getOpposite();
         BlockPos headPos = pistonPos.relative(dir);
@@ -334,6 +354,9 @@ public class PistonMechanics {
             //log("Firing neighbor updates for vacated pushed pos: " + toPush.get(i).toShortString());
             level.updateNeighborsAt(toPush.get(i));
         }
+        for (int i = toPush.size() - 1; i >= 0; i--) {
+            fireObserverRemovalUpdate(toPush.get(i), oldPushStates.get(toPush.get(i)));
+        }
         if (extending) {
             //log("Firing neighbor updates for moving piston head starting pos: " + headPos.toShortString());
             level.updateNeighborsAt(headPos);
@@ -346,6 +369,7 @@ public class PistonMechanics {
      * piston base, that base is also destroyed (and its destruction's
      * neighbor updates fired). Otherwise nothing further happens.
      */
+
     private void simulatePistonHeadOnRemove(BlockPos headPos, BlockState headState) {
         Direction headFacing = headState.getValue(PistonHeadBlock.FACING);
         PistonType headType  = headState.getValue(PistonHeadBlock.TYPE);

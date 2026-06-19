@@ -252,7 +252,7 @@ public class VirtualLevel {
         }
     }
 
-    private void updateNeighborsFromObserver(BlockPos obsPos, BlockState obsState) {
+    void updateNeighborsFromObserver(BlockPos obsPos, BlockState obsState) {
         Direction facing = obsState.getValue(BlockStateProperties.FACING);
         BlockPos outputPos = obsPos.relative(facing.getOpposite());
 
