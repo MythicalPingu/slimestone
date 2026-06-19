@@ -61,8 +61,7 @@ public class PistonMechanics {
                 BlockEvent event = new BlockEvent(pos, state, 0, facing);
                 if (!level.blockEvents.contains(event)) {
                     level.blockEvents.add(event);
-                    // ADD THIS LINE
-                    PistonDebugger.logExpected(pos, true, level.getCurrentTick());
+                    // REMOVED: PistonDebugger.logExpected(...)
                 }
             }
         } else if (!powered && extended) {
@@ -70,8 +69,7 @@ public class PistonMechanics {
             BlockEvent event = new BlockEvent(pos, state, 1, facing);
             if (!level.blockEvents.contains(event)) {
                 level.blockEvents.add(event);
-                // ADD THIS LINE
-                PistonDebugger.logExpected(pos, false, level.getCurrentTick());
+                // REMOVED: PistonDebugger.logExpected(...)
             }
         }
     }
@@ -160,6 +158,8 @@ public class PistonMechanics {
                 return;
             }
 
+            PistonDebugger.logExpected(pos, true, level.getCurrentTick());
+
             moveBlocks(pos, currentState, facing, true, resolver);
             boolean extendIsSticky = currentState.getBlock() == Blocks.STICKY_PISTON;
             level.setBlockRaw(pos, currentState.setValue(PistonBaseBlock.EXTENDED, true));
@@ -175,6 +175,8 @@ public class PistonMechanics {
                 level.setBlockRaw(pos, currentState.setValue(PistonBaseBlock.EXTENDED, true));
                 return;
             }
+
+            PistonDebugger.logExpected(pos, false, level.getCurrentTick());
 
             boolean isSticky = currentState.getBlock() == Blocks.STICKY_PISTON;
             BlockPos headPos = pos.relative(facing);

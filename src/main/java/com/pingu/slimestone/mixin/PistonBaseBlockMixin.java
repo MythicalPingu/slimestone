@@ -6,28 +6,26 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
-import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 @Mixin(PistonBaseBlock.class)
 public class PistonBaseBlockMixin {
 
     @Inject(
-            method = "checkIfExtend",
-            at = @At(
-                    value = "INVOKE",
-                    target = "Lnet/minecraft/world/level/Level;blockEvent(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/Block;II)V"
-            )
+            method = "triggerEvent",
+            at = @At("RETURN")
     )
-    private void onScheduleBlockEvent(Level level, BlockPos pos, BlockState state, CallbackInfo ci) {
-        if (level instanceof ServerLevel serverLevel) {
-            boolean isExtended = state.getValue(BlockStateProperties.EXTENDED);
-            boolean willExtend = !isExtended;
+    private void onTriggerEvent(BlockState state, Level level, BlockPos pos, int id, int param, CallbackInfoReturnable<Boolean> cir) {
+        // cir.getReturnValueZ() is true ONLY if the piston successfully pushed/pulled
+        if (level instanceof ServerLevel serverLevel && cir.getReturnValueZ()) {
 
-            PistonDebugger.logReal(pos, willExtend, serverLevel.getGameTime());
+            // id 0 = extend, id 1/2 = retract
+            boolean isExtending = (id == 0);
+
+            PistonDebugger.logReal(pos, isExtending, serverLevel.getGameTime());
         }
     }
 }
