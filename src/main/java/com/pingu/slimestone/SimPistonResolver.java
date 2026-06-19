@@ -169,7 +169,7 @@ public class SimPistonResolver {
 
     private boolean isPushable(BlockState state, Direction dir, BlockPos pos) {
         if (level.blockEntities.containsKey(pos)) return false;
-        if (state.isAir() || state.is(Blocks.OBSIDIAN) || state.is(Blocks.CRYING_OBSIDIAN) || state.is(Blocks.RESPAWN_ANCHOR) || state.is(Blocks.REINFORCED_DEEPSLATE) || state.is(Blocks.BEDROCK)) return false;
+        if (state.isAir() || state.is(Blocks.OBSIDIAN) || state.is(Blocks.CRYING_OBSIDIAN) || state.is(Blocks.RESPAWN_ANCHOR) || state.is(Blocks.REINFORCED_DEEPSLATE) || state.is(Blocks.BEDROCK )) return false;
 
         if (!state.is(Blocks.PISTON) && !state.is(Blocks.STICKY_PISTON)) {
             if (state.getPistonPushReaction() == PushReaction.BLOCK) return false;

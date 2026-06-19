@@ -3,7 +3,9 @@
 	"package": "com.pingu.slimestone.mixin",
 	"compatibilityLevel": "JAVA_21",
 	"mixins": [
-		"ObserverBlockMixin"
+		"ObserverBlockMixin",
+		"PistonBaseBlockMixin",
+		"PistonMovingBlockEntityMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

@@ -59,12 +59,20 @@ public class PistonMechanics {
             if (resolver.resolve()) {
                 level.log("Piston powered and path valid at " + pos.toShortString() + ". Queuing Extend.");
                 BlockEvent event = new BlockEvent(pos, state, 0, facing);
-                if (!level.blockEvents.contains(event)) level.blockEvents.add(event);
+                if (!level.blockEvents.contains(event)) {
+                    level.blockEvents.add(event);
+                    // ADD THIS LINE
+                    PistonDebugger.logExpected(pos, true, level.getCurrentTick());
+                }
             }
         } else if (!powered && extended) {
             level.log("Piston unpowered at " + pos.toShortString() + ". Queuing Contract Event.");
             BlockEvent event = new BlockEvent(pos, state, 1, facing);
-            if (!level.blockEvents.contains(event)) level.blockEvents.add(event);
+            if (!level.blockEvents.contains(event)) {
+                level.blockEvents.add(event);
+                // ADD THIS LINE
+                PistonDebugger.logExpected(pos, false, level.getCurrentTick());
+            }
         }
     }
 
@@ -168,11 +176,13 @@ public class PistonMechanics {
 
             level.setBlockRaw(pos, movingBaseState);
             level.blockEntities.put(pos, new SimPistonMovingEntity(pos, unextendedBase, facing, false, true));
+            MovingBlockDebugger.logExpected(pos, unextendedBase, false, level.getCurrentTick());
+            level.updateNeighborsAt(pos);
             level.fireShapeUpdates(pos); // Add this line
             level.log("Created MovingPiston BE at " + pos.toShortString() + " for Retracting "
                     + (isSticky ? "Sticky " : "") + "Base");
             //log("Firing neighbor updates for retracting base at: " + pos.toShortString());
-            level.updateNeighborsAt(pos);
+
             if (isSticky) {
                 BlockPos twoAheadPos = pos.relative(facing, 2);
                 SimPistonMovingEntity twoAheadBE = level.blockEntities.get(twoAheadPos);
@@ -293,6 +303,7 @@ public class PistonMechanics {
             PistonType type = pistonState.is(Blocks.STICKY_PISTON) ? PistonType.STICKY : PistonType.DEFAULT;
             SimPistonMovingEntity be = new SimPistonMovingEntity(newPos, movingState, dir, extending, false);
             level.blockEntities.put(newPos, be);
+            MovingBlockDebugger.logExpected(newPos, movingState, extending, level.getCurrentTick());
 
             level.setBlockRaw(newPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
             //log("Created MovingPiston BE at " + newPos.toShortString() + " carrying " + movingState.getBlock().getName().getString());
@@ -310,6 +321,7 @@ public class PistonMechanics {
             level.blockEntities.put(headPos, headBE);
             level.setBlockRaw(headPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
             //log("Created MovingPiston BE at " + headPos.toShortString() + " carrying PISTON_HEAD");
+            MovingBlockDebugger.logExpected(headPos, headState, true, level.getCurrentTick());
             level.fireShapeUpdates(headPos);
         }
 

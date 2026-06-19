@@ -1,5 +1,6 @@
 package com.pingu.slimestone;
 import net.minecraft.world.level.block.Block;
+// ObserverDebugger is in the same package — no extra import needed.
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
@@ -126,6 +127,9 @@ public class VirtualLevel {
                 updateNeighborsFromObserver(pos, unpowered);
             }
         }
+        if (state.getBlock() instanceof PistonBaseBlock) {
+            pistonMechanics.checkIfExtend(pos, state);
+        }
     }
 
     private void evaluateOwnShape(BlockPos pos, BlockState state) {
@@ -156,6 +160,7 @@ public class VirtualLevel {
     }
 
     public void runTickLoop(int maxTicks) {
+
         for (currentTick = 0; currentTick < maxTicks; currentTick++) {
             boolean active = false;
 
@@ -202,7 +207,9 @@ public class VirtualLevel {
             }
         }
     }
-
+    public int getCurrentTick() {
+        return currentTick;
+    }
     private void processScheduledTick(SimScheduledTick tick) {
         BlockState state = getBlockState(tick.pos());
 
@@ -226,6 +233,7 @@ public class VirtualLevel {
             BlockState unpowered = state.setValue(BlockStateProperties.POWERED, false);
             setBlockRaw(pos, unpowered);
             log("§3[Observer] " + pos.toShortString() + " → POWERED=false (pulse end)");
+            ObserverDebugger.logExpected(pos, false, currentTick);
 
             // 1. Emit Shape Updates to immediate neighbors (corresponds to vanilla setBlock flag 2)
             fireShapeUpdates(pos);
@@ -235,6 +243,7 @@ public class VirtualLevel {
             BlockState powered = state.setValue(BlockStateProperties.POWERED, true);
             setBlockRaw(pos, powered);
             log("§3[Observer] " + pos.toShortString() + " → POWERED=true (pulse start)");
+            ObserverDebugger.logExpected(pos, true, currentTick);
 
             fireShapeUpdates(pos);                   // neighbor cascade first, like vanilla setBlock
             scheduleTick(pos, Blocks.OBSERVER, 2);   // self-reschedule second, like vanilla's scheduleTick after setBlock
