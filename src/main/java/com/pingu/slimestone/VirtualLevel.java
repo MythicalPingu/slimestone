@@ -161,7 +161,7 @@ public class VirtualLevel {
     public void setBlock(BlockPos pos, BlockState state, int flags) {
         BlockState oldState = getBlockState(pos);
         setBlockRaw(pos, state);
-        log("Set block at " + pos.toShortString() + " to " + state.getBlock().getName().getString());
+        //log("Set block at " + pos.toShortString() + " to " + state.getBlock().getName().getString());
 
         // Emulate vanilla calling onPlace immediately after setting the chunk data
         handleOnPlace(pos, state, oldState);
@@ -180,7 +180,7 @@ public class VirtualLevel {
                 evaluateOwnShape(pos, currentState); // Tell ourselves to evaluate surroundings
             }
         } else {
-            log("§8[Vanilla Mechanics] Updates suppressed at " + pos.toShortString() + " because onPlace modified the state.");
+            //log("§8[Vanilla Mechanics] Updates suppressed at " + pos.toShortString() + " because onPlace modified the state.");
         }
     }
 
@@ -199,7 +199,7 @@ public class VirtualLevel {
                 // This intentionally bypasses UPDATE_NEIGHBORS (1) for this nested call
                 setBlock(pos, unpowered, UPDATE_KNOWN_SHAPE | UPDATE_CLIENTS);
 
-                log("§3[Observer] onPlace reset spurious POWERED state at " + pos.toShortString());
+                //log("§3[Observer] onPlace reset spurious POWERED state at " + pos.toShortString());
                 updateNeighborsFromObserver(pos, unpowered);
             }
         }
@@ -212,7 +212,7 @@ public class VirtualLevel {
         // Emulates a placed block running its own shape checks against neighbors upon landing
         if (state.is(Blocks.OBSERVER)) {
             if (!state.getValue(BlockStateProperties.POWERED) && !hasScheduledTick(pos, Blocks.OBSERVER)) {
-                log("§3[Schedule] Observer at " + pos.toShortString() + " → fires next tick");
+                //log("§3[Schedule] Observer at " + pos.toShortString() + " → fires next tick");
                 scheduleTick(pos, Blocks.OBSERVER, 2);
             }
         }
@@ -280,7 +280,7 @@ public class VirtualLevel {
 
 
             if (!active && blockEvents.isEmpty() && neighborUpdates.isEmpty() && scheduledBlockTicks.isEmpty()) {
-                log("§8Simulation settled. Halting early.");
+                //log("§8Simulation settled. Halting early.");
                 break;
             }
         }
@@ -292,8 +292,8 @@ public class VirtualLevel {
         BlockState state = getBlockState(tick.pos());
 
         if (!state.is(tick.type())) {
-            log("§8[Tick] Cancelled stale " + tick.type().getName().getString()
-                    + " tick at " + tick.pos().toShortString() + " (block changed)");
+            //log("§8[Tick] Cancelled stale " + tick.type().getName().getString()
+            //        + " tick at " + tick.pos().toShortString() + " (block changed)");
             return;
         }
 
@@ -310,7 +310,7 @@ public class VirtualLevel {
         if (wasPowered) {
             BlockState unpowered = state.setValue(BlockStateProperties.POWERED, false);
             setBlockRaw(pos, unpowered);
-            log("§3[Observer] " + pos.toShortString() + " → POWERED=false (pulse end)");
+            //log("§3[Observer] " + pos.toShortString() + " → POWERED=false (pulse end)");
             ObserverDebugger.logExpected(pos, false, currentTick);
 
             // 1. Emit Shape Updates to immediate neighbors
@@ -320,7 +320,7 @@ public class VirtualLevel {
         } else {
             BlockState powered = state.setValue(BlockStateProperties.POWERED, true);
             setBlockRaw(pos, powered);
-            log("§3[Observer] " + pos.toShortString() + " → POWERED=true (pulse start)");
+            //log("§3[Observer] " + pos.toShortString() + " → POWERED=true (pulse start)");
             ObserverDebugger.logExpected(pos, true, currentTick);
 
             // --- NEW: Display the GT if it's the first time ---
@@ -410,7 +410,7 @@ public class VirtualLevel {
 
             if (state.is(Blocks.OBSERVER)) {
                 // Emulate the Mixin's updateShape logging exactly
-                log("§6[ShapeUpdate] Detected update from " + dir.getOpposite().getName() + " side at " + neighborPos.toShortString());
+                //log("§6[ShapeUpdate] Detected update from " + dir.getOpposite().getName() + " side at " + neighborPos.toShortString());
 
                 Direction facing = state.getValue(BlockStateProperties.FACING);
                 BlockPos lookingAt = neighborPos.relative(facing);
@@ -418,7 +418,7 @@ public class VirtualLevel {
                 if (lookingAt.equals(pos)) {
                     // This block matches vanilla's startSignal behavior
                     if (!state.getValue(BlockStateProperties.POWERED) && !hasScheduledTick(neighborPos, Blocks.OBSERVER)) {
-                        log("§3[Schedule] Observer at " + neighborPos.toShortString() + " → fires next tick");
+                        //log("§3[Schedule] Observer at " + neighborPos.toShortString() + " → fires next tick");
                         scheduleTick(neighborPos, Blocks.OBSERVER, 2);
                     }
                 }
@@ -428,8 +428,8 @@ public class VirtualLevel {
                     BlockState updated = simSetNoteBlockInstrument(neighborPos, state);
                     if (updated != state) {
                         setBlockRaw(neighborPos, updated);
-                        log("§a[NoteBlock] Instrument updated at " + neighborPos.toShortString()
-                                + " → " + updated.getValue(BlockStateProperties.NOTEBLOCK_INSTRUMENT).name());
+                        //log("§a[NoteBlock] Instrument updated at " + neighborPos.toShortString()
+                        //        + " → " + updated.getValue(BlockStateProperties.NOTEBLOCK_INSTRUMENT).name());
                     }
                 }
                 // Non-Y directions fall through super.updateShape, which is a no-op for NoteBlock.
@@ -519,7 +519,7 @@ public class VirtualLevel {
         boolean wasPowered = state.getValue(BlockStateProperties.POWERED);
         if (signal == wasPowered) return;
 
-        log("§a[NoteBlock] " + pos.toShortString() + " → POWERED=" + signal);
+        //log("§a[NoteBlock] " + pos.toShortString() + " → POWERED=" + signal);
         // flag 3 = UPDATE_ALL (UPDATE_NEIGHBORS | UPDATE_CLIENTS), matching vanilla
         setBlock(pos, state.setValue(BlockStateProperties.POWERED, signal), UPDATE_ALL);
     }
@@ -554,11 +554,11 @@ public class VirtualLevel {
         if (isLit) {
             // Signal lost — schedule a delayed turn-off (vanilla: 4 game-ticks).
             // hasScheduledTick guard inside scheduleTick prevents duplicates.
-            log("§c[Lamp] " + pos.toShortString() + " → turn-off scheduled in 4t");
+            //log("§c[Lamp] " + pos.toShortString() + " → turn-off scheduled in 4t");
             scheduleTick(pos, Blocks.REDSTONE_LAMP, 4);
         } else {
             // Signal arrived — turn on immediately.
-            log("§c[Lamp] " + pos.toShortString() + " → LIT=true");
+            //log("§c[Lamp] " + pos.toShortString() + " → LIT=true");
             // Flag 2 = UPDATE_CLIENTS: fires shape updates but NOT neighbor updates,
             // matching vanilla's setBlock(pos, state.cycle(LIT), 2).
             setBlock(pos, state.setValue(BlockStateProperties.LIT, true), UPDATE_CLIENTS);
@@ -573,10 +573,10 @@ public class VirtualLevel {
      */
     private void processRedstoneLampTick(BlockPos pos, BlockState state) {
         if (state.getValue(BlockStateProperties.LIT) && !simHasNeighborSignal(pos)) {
-            log("§c[Lamp] " + pos.toShortString() + " → LIT=false (4t delay elapsed)");
+            //log("§c[Lamp] " + pos.toShortString() + " → LIT=false (4t delay elapsed)");
             setBlock(pos, state.setValue(BlockStateProperties.LIT, false), UPDATE_CLIENTS);
         } else {
-            log("§8[Lamp] " + pos.toShortString() + " → turn-off tick no-op (still powered or already unlit)");
+            //log("§8[Lamp] " + pos.toShortString() + " → turn-off tick no-op (still powered or already unlit)");
         }
     }
 
@@ -602,8 +602,8 @@ public class VirtualLevel {
                 .setValue(BlockStateProperties.POWERED, signal)
                 .setValue(BlockStateProperties.OPEN,    signal);
 
-        log("§9[TrapDoor] " + pos.toShortString()
-                + " → POWERED=" + signal + ", OPEN=" + signal);
+        //("§9[TrapDoor] " + pos.toShortString()
+        //       + " → POWERED=" + signal + ", OPEN=" + signal);
 
         // Flag 2 = UPDATE_CLIENTS only.
         // setBlock will fire shape updates (bit 16 not set → shape updates run)

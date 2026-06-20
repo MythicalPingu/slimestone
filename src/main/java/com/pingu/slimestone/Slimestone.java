@@ -104,8 +104,8 @@ public class Slimestone implements ModInitializer {
                                         || MovingBlockDebugger.recordState == MovingBlockDebugger.RecordState.RECORDING;
 
                                 if (!obsActive && !pisActive && !movActive) {
-                                    player.sendSystemMessage(Component.literal(
-                                            "§c[Slimestone] No active recording. Run §f/slimestone§c first."));
+                                    //player.sendSystemMessage(Component.literal(
+                                    //        "§c[Slimestone] No active recording. Run §f/slimestone§c first."));
                                     return 0;
                                 }
 
@@ -144,8 +144,8 @@ public class Slimestone implements ModInitializer {
         trackedOrigin = origin.immutable();
         trackingEnabled = true;
 
-        player.sendSystemMessage(Component.literal(
-                "§a[Slimestone] Tracking enabled at " + trackedOrigin.toShortString()));
+        //player.sendSystemMessage(Component.literal(
+        //        "§a[Slimestone] Tracking enabled at " + trackedOrigin.toShortString()));
 
         runSimulation(player, trackedOrigin);
     }
@@ -155,7 +155,7 @@ public class Slimestone implements ModInitializer {
         trackedOrigin = null;
         trackedPlayer = null;
 
-        player.sendSystemMessage(Component.literal("§e[Slimestone] Tracking disabled."));
+        //player.sendSystemMessage(Component.literal("§e[Slimestone] Tracking disabled."));
     }
 
     private void refreshTrackedSimulation() {
@@ -173,8 +173,8 @@ public class Slimestone implements ModInitializer {
 
     // ── Simulation ────────────────────────────────────────────────────────────
     private void runSimulation(ServerPlayer player, BlockPos targetPos) {
-        player.sendSystemMessage(Component.literal(
-                "§a[Slimestone] Starting virtual simulation at " + targetPos.toShortString()));
+        //player.sendSystemMessage(Component.literal(
+        //        "§a[Slimestone] Starting virtual simulation at " + targetPos.toShortString()));
 
         ObserverDebugger.resetExpected();
         PistonDebugger.resetExpected();
@@ -195,14 +195,14 @@ public class Slimestone implements ModInitializer {
         BlockState targetState = level.getBlockState(targetPos);
 
         if (targetState.getBlock() instanceof PistonBaseBlock) {
-            level.log("Checking initial power for piston at " + targetPos.toShortString());
+            //level.log("Checking initial power for piston at " + targetPos.toShortString());
             level.checkIfExtend(targetPos, targetState);
         } else if (targetState.is(Blocks.OBSERVER)) {
-            level.log("Observer at " + targetPos.toShortString() + " — simulating artificial update");
+            //level.log("Observer at " + targetPos.toShortString() + " — simulating artificial update");
             level.scheduleTick(targetPos, Blocks.OBSERVER, 2);
         } else {
-            player.sendSystemMessage(Component.literal(
-                    "§c[Slimestone] Target is not a piston or observer!"));
+            //player.sendSystemMessage(Component.literal(
+            //        "§c[Slimestone] Target is not a piston or observer!"));
             return;
         }
 
@@ -214,53 +214,53 @@ public class Slimestone implements ModInitializer {
         level.runTickLoop(100);
 
         int expCount = ObserverDebugger.expected.size();
-        player.sendSystemMessage(Component.literal(
-                "§e[Slimestone] Simulation predicted §f" + expCount
-                        + "§e observer events in the first §f" + ObserverDebugger.RECORD_GT + "§e GT:"));
+        //player.sendSystemMessage(Component.literal(
+        //        "§e[Slimestone] Simulation predicted §f" + expCount
+        //                + "§e observer events in the first §f" + ObserverDebugger.RECORD_GT + "§e GT:"));
 
         if (expCount == 0) {
-            player.sendSystemMessage(Component.literal("§7  (none — no observers fired in this window)"));
+            //player.sendSystemMessage(Component.literal("§7  (none — no observers fired in this window)"));
         } else {
             for (int i = 0; i < expCount; i++) {
                 ObserverDebugger.ObserverEvent e = ObserverDebugger.expected.get(i);
                 String stateStr = e.poweredOn() ? "§aON" : "§cOFF";
-                player.sendSystemMessage(Component.literal(
-                        "§7  #" + (i + 1) + "  GT" + e.gt() + "  "
-                                + e.pos().toShortString() + "  " + stateStr));
+                //player.sendSystemMessage(Component.literal(
+                //        "§7  #" + (i + 1) + "  GT" + e.gt() + "  "
+                //                + e.pos().toShortString() + "  " + stateStr));
             }
         }
 
         int expPisCount = PistonDebugger.expected.size();
-        player.sendSystemMessage(Component.literal(
-                "§b[Slimestone] Simulation predicted §f" + expPisCount
-                        + "§b piston events in the first §f" + PistonDebugger.RECORD_GT + "§b GT:"));
+        //player.sendSystemMessage(Component.literal(
+        //        "§b[Slimestone] Simulation predicted §f" + expPisCount
+        //                + "§b piston events in the first §f" + PistonDebugger.RECORD_GT + "§b GT:"));
 
         if (expPisCount == 0) {
-            player.sendSystemMessage(Component.literal("§7  (none — no pistons fired in this window)"));
+            //player.sendSystemMessage(Component.literal("§7  (none — no pistons fired in this window)"));
         } else {
             for (int i = 0; i < expPisCount; i++) {
                 PistonDebugger.PistonEvent e = PistonDebugger.expected.get(i);
                 String stateStr = e.extending() ? "§bEXTEND" : "§6RETRACT";
-                player.sendSystemMessage(Component.literal(
-                        "§7  #" + (i + 1) + "  GT" + e.gt() + "  "
-                                + e.pos().toShortString() + "  " + stateStr));
+                //player.sendSystemMessage(Component.literal(
+                //        "§7  #" + (i + 1) + "  GT" + e.gt() + "  "
+                //                + e.pos().toShortString() + "  " + stateStr));
             }
         }
 
         int expMovCount = MovingBlockDebugger.expected.size();
-        player.sendSystemMessage(Component.literal(
-                "§d[Slimestone] Simulation predicted §f" + expMovCount
-                        + "§d moving block events in the first §f" + MovingBlockDebugger.RECORD_GT + "§d GT:"));
+        //player.sendSystemMessage(Component.literal(
+        //        "§d[Slimestone] Simulation predicted §f" + expMovCount
+        //                + "§d moving block events in the first §f" + MovingBlockDebugger.RECORD_GT + "§d GT:"));
 
         if (expMovCount == 0) {
-            player.sendSystemMessage(Component.literal("§7  (none — no moving blocks fired in this window)"));
+            //player.sendSystemMessage(Component.literal("§7  (none — no moving blocks fired in this window)"));
         } else {
             for (int i = 0; i < expMovCount; i++) {
                 MovingBlockDebugger.MovingBlockEvent e = MovingBlockDebugger.expected.get(i);
                 String stateStr = e.extending() ? "§bEXTEND" : "§6RETRACT";
-                player.sendSystemMessage(Component.literal(
-                        "§7  #" + (i + 1) + "  GT" + e.gt() + "  "
-                                + e.pos().toShortString() + "  " + stateStr + " §8[" + e.blockName() + "]"));
+                //player.sendSystemMessage(Component.literal(
+                //        "§7  #" + (i + 1) + "  GT" + e.gt() + "  "
+                //                + e.pos().toShortString() + "  " + stateStr + " §8[" + e.blockName() + "]"));
             }
         }
 
@@ -268,9 +268,9 @@ public class Slimestone implements ModInitializer {
         PistonDebugger.prepareForRealRecording(player);
         MovingBlockDebugger.prepareForRealRecording(player);
 
-        player.sendSystemMessage(Component.literal(
-                "§a[Slimestone] Ready — run your machine! (auto-compare after §f"
-                        + ObserverDebugger.RECORD_GT + "§a GT, or type §f/slimestone compare§a)"));
+        //player.sendSystemMessage(Component.literal(
+        //        "§a[Slimestone] Ready — run your machine! (auto-compare after §f"
+        //                + ObserverDebugger.RECORD_GT + "§a GT, or type §f/slimestone compare§a)"));
     }
 
     private BlockPos getTargetBlock(ServerPlayer player) {
@@ -313,6 +313,6 @@ public class Slimestone implements ModInitializer {
                 summon
         );
 
-        player.sendSystemMessage(Component.literal("§a[Slimestone] Placed text display:\nGt 0\n3a\n12"));
+        //player.sendSystemMessage(Component.literal("§a[Slimestone] Placed text display:\nGt 0\n3a\n12"));
     }
 }

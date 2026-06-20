@@ -57,7 +57,7 @@ public class PistonMechanics {
         if (powered && !extended) {
             SimPistonResolver resolver = new SimPistonResolver(level, pos, facing, true);
             if (resolver.resolve()) {
-                level.log("Piston powered and path valid at " + pos.toShortString() + ". Queuing Extend.");
+                //level.log("Piston powered and path valid at " + pos.toShortString() + ". Queuing Extend.");
                 BlockEvent event = new BlockEvent(pos, state, 0, facing);
                 if (!level.blockEvents.contains(event)) {
                     level.blockEvents.add(event);
@@ -65,7 +65,7 @@ public class PistonMechanics {
                 }
             }
         } else if (!powered && extended) {
-            level.log("Piston unpowered at " + pos.toShortString() + ". Queuing Contract Event.");
+            //level.log("Piston unpowered at " + pos.toShortString() + ". Queuing Contract Event.");
             BlockEvent event = new BlockEvent(pos, state, 1, facing);
             if (!level.blockEvents.contains(event)) {
                 level.blockEvents.add(event);
@@ -89,8 +89,8 @@ public class PistonMechanics {
         if (!level.hasScheduledTick(pos, Blocks.OBSERVER)) return;
 
         BlockPos outputPos = pos.relative(oldState.getValue(BlockStateProperties.FACING).getOpposite());
-        level.log("§b[Observer] Powered observer removed at " + pos.toShortString()
-                + ", instant update → " + outputPos.toShortString());
+        //level.log("§b[Observer] Powered observer removed at " + pos.toShortString()
+        //        + ", instant update → " + outputPos.toShortString());
         level.updateNeighborsFromObserver(pos, oldState);
     }
     /**
@@ -117,9 +117,9 @@ public class PistonMechanics {
                 && baseState.getValue(BlockStateProperties.FACING) == facing;
 
         if (!isFittingBase && !isMovingBase) {
-            level.log("§c[Survival] PISTON_HEAD at " + pos.toShortString() + " lost its valid base, destroying it");
+            //level.log("§c[Survival] PISTON_HEAD at " + pos.toShortString() + " lost its valid base, destroying it");
             level.setBlock(pos, Blocks.AIR.defaultBlockState());
-            level.log("§d[Survival] Firing neighbor updates for destroyed PISTON_HEAD at: " + pos.toShortString());
+            //level.log("§d[Survival] Firing neighbor updates for destroyed PISTON_HEAD at: " + pos.toShortString());
             level.updateNeighborsAt(pos);
             return; // Stop processing since the head is now Air
         }
@@ -139,7 +139,7 @@ public class PistonMechanics {
         BlockState currentState = level.getBlockState(pos);
 
         if (!currentState.is(queuedState.getBlock())) {
-            level.log("§eEvent cancelled: Block at " + pos.toShortString() + " is no longer the correct piston variant.");
+            //level.log("§eEvent cancelled: Block at " + pos.toShortString() + " is no longer the correct piston variant.");
             return;
         }
 
@@ -147,14 +147,14 @@ public class PistonMechanics {
         boolean isPowered = level.hasRedstoneBlockPower(pos, facing);
         if (type == 0) {
             if (!isPowered) {
-                level.log("§eExtend cancelled: piston lost power before processing at " + pos.toShortString());
+                //level.log("§eExtend cancelled: piston lost power before processing at " + pos.toShortString());
                 return;
             }
 
             SimPistonResolver resolver = new SimPistonResolver(level, pos, facing, true);
             if (!resolver.resolve()) {
-                level.log("§cExtend failed: " + resolver.getFailureReason() + " (Pos: " +
-                        (resolver.getFailurePos() != null ? resolver.getFailurePos().toShortString() : "N/A") + ")");
+                //level.log("§cExtend failed: " + resolver.getFailureReason() + " (Pos: " +
+                //        (resolver.getFailurePos() != null ? resolver.getFailurePos().toShortString() : "N/A") + ")");
                 return;
             }
 
@@ -174,13 +174,13 @@ public class PistonMechanics {
             level.setBlockRaw(pos, currentState.setValue(PistonBaseBlock.EXTENDED, true));
             level.fireShapeUpdates(pos);
 
-            level.log("Set block at " + pos.toShortString() + " to "
-                    + (extendIsSticky ? "Sticky Piston Headless Base" : "Piston Headless Base"));
+            //level.log("Set block at " + pos.toShortString() + " to "
+            //        + (extendIsSticky ? "Sticky Piston Headless Base" : "Piston Headless Base"));
             //log("Firing neighbor updates for piston base at: " + pos.toShortString());
             level.updateNeighborsAt(pos);
         } else if (type == 1) {
             if (isPowered) {
-                level.log("§eRetract cancelled: piston re-gained power at " + pos.toShortString());
+                //level.log("§eRetract cancelled: piston re-gained power at " + pos.toShortString());
                 level.setBlockRaw(pos, currentState.setValue(PistonBaseBlock.EXTENDED, true));
                 return;
             }
@@ -193,7 +193,7 @@ public class PistonMechanics {
             // 1. Unconditionally final-tick ANY moving block at the head position (Vanilla Step 1)
             SimPistonMovingEntity headBE = level.blockEntities.get(headPos);
             if (headBE != null) {
-                level.log("Instant finalTick on moving head at " + headPos.toShortString());
+                //level.log("Instant finalTick on moving head at " + headPos.toShortString());
                 headBE.finalTick(level);
             }
 
@@ -209,8 +209,8 @@ public class PistonMechanics {
             MovingBlockDebugger.logExpected(pos, unextendedBase, false, level.getCurrentTick());
             level.updateNeighborsAt(pos);
             level.fireShapeUpdates(pos); // Add this line
-            level.log("Created MovingPiston BE at " + pos.toShortString() + " for Retracting "
-                    + (isSticky ? "Sticky " : "") + "Base");
+            //level.log("Created MovingPiston BE at " + pos.toShortString() + " for Retracting "
+            //        + (isSticky ? "Sticky " : "") + "Base");
             //log("Firing neighbor updates for retracting base at: " + pos.toShortString());
 
             if (isSticky) {
@@ -219,7 +219,7 @@ public class PistonMechanics {
                 boolean instantFinished = false;
 
                 if (twoAheadBE != null && twoAheadBE.extending && twoAheadBE.direction == facing) {
-                    level.log("Instant finalTick on mid-push block at " + twoAheadPos.toShortString());
+                    //level.log("Instant finalTick on mid-push block at " + twoAheadPos.toShortString());
                     twoAheadBE.finalTick(level);
                     instantFinished = true;
                 }
@@ -241,7 +241,7 @@ public class PistonMechanics {
                     } else {
                         BlockState headStateBeforeResolve = level.getBlockState(headPos);
                         if (headStateBeforeResolve.is(Blocks.PISTON_HEAD)) {
-                            level.log("§7[Vanilla moveBlocks] Clearing PISTON_HEAD quietly before resolver (Flag 20)");
+                            //level.log("§7[Vanilla moveBlocks] Clearing PISTON_HEAD quietly before resolver (Flag 20)");
                             level.setBlockRaw(headPos, Blocks.AIR.defaultBlockState());
                         }
 
@@ -254,7 +254,7 @@ public class PistonMechanics {
 
                             moveBlocks(pos, currentState, facing, false, resolver);
                         } else {
-                            level.log("§cRetract pull failed: " + resolver.getFailureReason());
+                            //level.log("§cRetract pull failed: " + resolver.getFailureReason());
 
                             // --- SLIMESTONE DISPLAY LOGIC ---
                             // Pull failed (e.g., hit an immovable block) so it pulled 0 blocks
@@ -278,11 +278,11 @@ public class PistonMechanics {
         BlockState headState = level.getBlockState(headPos);
         if (!headState.isAir()) {
             if (headState.getBlock() instanceof PistonHeadBlock) {
-                level.log("§c[Instant Delete] PISTON_HEAD facing "
-                        + headState.getValue(PistonHeadBlock.FACING).getName().toUpperCase()
-                        + " at " + headPos.toShortString());
+                //level.log("§c[Instant Delete] PISTON_HEAD facing "
+                //        + headState.getValue(PistonHeadBlock.FACING).getName().toUpperCase()
+                //        + " at " + headPos.toShortString());
             } else {
-                level.log("§c[Instant Delete] Block " + headState.getBlock().getName().getString() + " at " + headPos.toShortString());
+                //level.log("§c[Instant Delete] Block " + headState.getBlock().getName().getString() + " at " + headPos.toShortString());
             }
             level.setBlock(headPos, Blocks.AIR.defaultBlockState());
 
@@ -305,7 +305,7 @@ public class PistonMechanics {
         List<BlockPos> toPush = resolver.toPush;
         List<BlockPos> toDestroy = resolver.toDestroy;
 
-        level.log("Resolver found " + toPush.size() + " blocks to move, " + toDestroy.size() + " blocks to destroy.");
+        //level.log("Resolver found " + toPush.size() + " blocks to move, " + toDestroy.size() + " blocks to destroy.");
 
         for (int i = toDestroy.size() - 1; i >= 0; i--) {
             BlockPos p = toDestroy.get(i);
@@ -399,25 +399,25 @@ public class PistonMechanics {
                 && baseState.getValue(PistonBaseBlock.FACING) == headFacing;
 
         if (fittingBase) {
-            level.log("§c[onRemove] isFittingBase=true — "
-                    + (headType == PistonType.STICKY ? "sticky " : "")
-                    + "base still EXTENDED at " + basePos.toShortString() + ", destroying it");
+            //level.log("§c[onRemove] isFittingBase=true — "
+            //        + (headType == PistonType.STICKY ? "sticky " : "")
+            //        + "base still EXTENDED at " + basePos.toShortString() + ", destroying it");
             level.setBlock(basePos, Blocks.AIR.defaultBlockState());
-            level.log("§d[onRemove] Neighbour updates from base destruction at " + basePos.toShortString() + ":");
+            //level.log("§d[onRemove] Neighbour updates from base destruction at " + basePos.toShortString() + ":");
             for (Direction dir : VirtualLevel.UPDATE_ORDER) {
                 //log("§d    " + dir.getName().toUpperCase() + " → " + basePos.relative(dir).toShortString());
             }
             level.updateNeighborsAt(basePos);
         } else {
-            level.log("§7[onRemove] isFittingBase=false — "
-                    + baseState.getBlock().getName().getString()
-                    + " at " + basePos.toShortString() + " is not a fitting base, no further deletion");
+            //level.log("§7[onRemove] isFittingBase=false — "
+            //        + baseState.getBlock().getName().getString()
+            //        + " at " + basePos.toShortString() + " is not a fitting base, no further deletion");
         }
 
         // Enumerate the six positions that updateNeighborsAt(headPos) will touch
         // later in the retraction flow. Printed here so they appear adjacent to
         // the instant-delete log rather than buried later in the output.
-        level.log("§d[onRemove] Neighbour updates from PISTON_HEAD deletion at " + headPos.toShortString() + ":");
+        //level.log("§d[onRemove] Neighbour updates from PISTON_HEAD deletion at " + headPos.toShortString() + ":");
         for (Direction dir : VirtualLevel.UPDATE_ORDER) {
             //log("§d    " + dir.getName().toUpperCase() + " → " + headPos.relative(dir).toShortString());
         }
