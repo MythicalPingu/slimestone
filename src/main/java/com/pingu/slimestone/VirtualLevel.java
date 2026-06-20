@@ -35,6 +35,21 @@ public class VirtualLevel {
     // All piston extend/retract simulation lives here
     public final PistonMechanics pistonMechanics;
 
+    private final Set<BlockPos> activatedObservers = new HashSet<>();
+    private final Set<BlockPos> activatedPistons = new HashSet<>();
+    private final List<PendingDisplay> pendingObserverDisplays = new ArrayList<>();
+    private final List<PendingDisplay> pendingPistonDisplays = new ArrayList<>();
+
+    public static class PendingDisplay {
+        public final BlockPos pos;
+        public final String extraText;
+
+        public PendingDisplay(BlockPos pos, String extraText) {
+            this.pos = pos;
+            this.extraText = extraText;
+        }
+    }
+
     // Package-private so the Resolver can verify moving pistons
     final Map<BlockPos, SimPistonMovingEntity> blockEntities = new LinkedHashMap<>();
 
@@ -57,6 +72,48 @@ public class VirtualLevel {
         this.player = player;
         this.pistonMechanics = new PistonMechanics(this);
     }
+    public void queueObserverDisplay(BlockPos pos) {
+        if (activatedObservers.add(pos.immutable())) {
+            pendingObserverDisplays.add(new PendingDisplay(pos.immutable(), ""));
+        }
+    }
+
+    public void queuePistonDisplay(BlockPos pos, int blockCount) {
+        if (activatedPistons.add(pos.immutable())) {
+            pendingPistonDisplays.add(new PendingDisplay(pos.immutable(), ", " + blockCount));
+        }
+    }
+
+    private void flushDisplays(List<PendingDisplay> displays, int tick) {
+        if (displays.isEmpty()) return;
+        boolean useSuffix = displays.size() > 1; // Only use a,b,c if more than 1 activated
+
+        for (int i = 0; i < displays.size(); i++) {
+            PendingDisplay d = displays.get(i);
+            String suffix = useSuffix ? String.valueOf((char) ('a' + i)) : "";
+            String text = "Gt " + tick + suffix + d.extraText;
+            spawnGtDisplay(d.pos, text);
+        }
+        displays.clear();
+    }
+
+    private void spawnGtDisplay(BlockPos targetPos, String jsonText) {
+        double x = targetPos.getX() + 0.5;
+        double y = targetPos.getY() + 0.5;
+        double z = targetPos.getZ() + 0.5;
+
+        String summon = String.format(
+                java.util.Locale.US,
+                "summon minecraft:text_display %.3f %.3f %.3f {text:'\"%s\"',billboard:\"center\",see_through:1b,shadow:0b,default_background:1b,alignment:\"center\",line_width:200}",
+                x, y, z, jsonText
+        );
+
+        player.getServer().getCommands().performPrefixedCommand(
+                player.createCommandSourceStack(),
+                summon
+        );
+    }
+
 
     public void log(String msg) {
         String phaseColor = switch (currentPhase) {
@@ -164,21 +221,20 @@ public class VirtualLevel {
         for (currentTick = 0; currentTick < maxTicks; currentTick++) {
             boolean active = false;
 
-            // ── PHASE 1: TILE TICK (scheduled block ticks) ───────────────────
-// 1. Drain all ticks for the current gametick
+
             List<SimScheduledTick> currentlyTicking = new ArrayList<>();
             while (!scheduledBlockTicks.isEmpty() && scheduledBlockTicks.peek().triggerTick() <= currentTick) {
                 currentlyTicking.add(scheduledBlockTicks.poll());
             }
 
-// 2. Process them.
-// Because they are no longer in scheduledBlockTicks, hasScheduledTick()
-// will accurately return false, replicating vanilla's blind spot!
             for (SimScheduledTick tick : currentlyTicking) {
                 active = true;
                 processScheduledTick(tick);
                 flushNeighborUpdates();
             }
+
+            // FLUSH OBSERVER LABELS HERE
+            flushDisplays(pendingObserverDisplays, currentTick);
 
             // ── PHASE 2: BLOCK EVENTS ─────────────────────────────────────────
             currentPhase = "BLOCK EVENTS";
@@ -189,6 +245,9 @@ public class VirtualLevel {
                 flushNeighborUpdates();
                 blockEvents.poll();
             }
+
+            // FLUSH PISTON LABELS HERE
+            flushDisplays(pendingPistonDisplays, currentTick);
 
             // ── PHASE 3: BLOCK ENTITIES ────────────────────────────────────────
             currentPhase = "BLOCK ENTITIES";
@@ -235,7 +294,7 @@ public class VirtualLevel {
             log("§3[Observer] " + pos.toShortString() + " → POWERED=false (pulse end)");
             ObserverDebugger.logExpected(pos, false, currentTick);
 
-            // 1. Emit Shape Updates to immediate neighbors (corresponds to vanilla setBlock flag 2)
+            // 1. Emit Shape Updates to immediate neighbors
             fireShapeUpdates(pos);
             // 2. Emit Redstone Updates to the back block and its neighbors
             updateNeighborsFromObserver(pos, unpowered);
@@ -245,8 +304,12 @@ public class VirtualLevel {
             log("§3[Observer] " + pos.toShortString() + " → POWERED=true (pulse start)");
             ObserverDebugger.logExpected(pos, true, currentTick);
 
-            fireShapeUpdates(pos);                   // neighbor cascade first, like vanilla setBlock
-            scheduleTick(pos, Blocks.OBSERVER, 2);   // self-reschedule second, like vanilla's scheduleTick after setBlock
+            // --- NEW: Display the GT if it's the first time ---
+            queueObserverDisplay(pos);
+            // --------------------------------------------------
+
+            fireShapeUpdates(pos);
+            scheduleTick(pos, Blocks.OBSERVER, 2);
 
             updateNeighborsFromObserver(pos, powered);
         }

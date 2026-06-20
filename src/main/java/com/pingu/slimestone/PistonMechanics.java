@@ -158,8 +158,17 @@ public class PistonMechanics {
                 return;
             }
 
-            PistonDebugger.logExpected(pos, true, level.getCurrentTick());
+            // --- SLIMESTONE DISPLAY LOGIC ---
+            int pushCount = resolver.toPush.size();
+            boolean isSticky = currentState.getBlock() == Blocks.STICKY_PISTON;
 
+            // Log if it's a normal piston OR if it's a sticky piston pushing > 0 blocks
+            if (!isSticky || pushCount > 0) {
+                level.queuePistonDisplay(pos, pushCount);
+            }
+            // --------------------------------
+
+            PistonDebugger.logExpected(pos, true, level.getCurrentTick());
             moveBlocks(pos, currentState, facing, true, resolver);
             boolean extendIsSticky = currentState.getBlock() == Blocks.STICKY_PISTON;
             level.setBlockRaw(pos, currentState.setValue(PistonBaseBlock.EXTENDED, true));
@@ -224,31 +233,32 @@ public class PistonMechanics {
                             || twoAheadState.is(Blocks.STICKY_PISTON));
 
                     if (!shouldPull) {
-                        // Vanilla calls removeBlock unconditionally if no pull is attempted.
-                        // This DOES trigger neighbor updates at the head position.
                         removeHeadBlock(headPos);
-                    } else {
-                        // Vanilla delegates to moveBlocks(..., false).
-                        // It silently clears the PISTON_HEAD with flag 20 (no neighbor updates).
-                        BlockState headStateBeforeResolve = level.getBlockState(headPos);
 
+                        // --- SLIMESTONE DISPLAY LOGIC ---
+                        // Pulled nothing (0 blocks)
+                        level.queuePistonDisplay(pos, 0);
+                    } else {
+                        BlockState headStateBeforeResolve = level.getBlockState(headPos);
                         if (headStateBeforeResolve.is(Blocks.PISTON_HEAD)) {
                             level.log("§7[Vanilla moveBlocks] Clearing PISTON_HEAD quietly before resolver (Flag 20)");
                             level.setBlockRaw(headPos, Blocks.AIR.defaultBlockState());
-                            // We explicitly skip simulatePistonHeadOnRemove here.
-                            // The base is already MOVING_PISTON, so no base destruction occurs,
-                            // and flag 20 suppresses all block removal neighbor updates.
                         }
 
                         SimPistonResolver resolver = new SimPistonResolver(level, pos, facing, false);
 
                         if (resolver.resolve()) {
+                            // --- SLIMESTONE DISPLAY LOGIC ---
+                            // Successfully resolved a pull
+                            level.queuePistonDisplay(pos, resolver.toPush.size());
+
                             moveBlocks(pos, currentState, facing, false, resolver);
                         } else {
                             level.log("§cRetract pull failed: " + resolver.getFailureReason());
-                            // Nothing else happens.
-                            // The Piston Head stays deleted, Obsidian stays put, and crucially:
-                            // NO neighbor updates are fired from headPos.
+
+                            // --- SLIMESTONE DISPLAY LOGIC ---
+                            // Pull failed (e.g., hit an immovable block) so it pulled 0 blocks
+                            level.queuePistonDisplay(pos, 0);
                         }
                     }
                 }

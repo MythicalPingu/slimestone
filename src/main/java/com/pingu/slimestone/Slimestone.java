@@ -118,7 +118,6 @@ public class Slimestone implements ModInitializer {
     }
 
     // ── Simulation ────────────────────────────────────────────────────────────
-
     private void runSimulation(ServerPlayer player, BlockPos targetPos) {
         player.sendSystemMessage(Component.literal(
                 "§a[Slimestone] Starting virtual simulation at " + targetPos.toShortString()));
@@ -154,6 +153,12 @@ public class Slimestone implements ModInitializer {
                     "§c[Slimestone] Target is not a piston or observer!"));
             return;
         }
+
+        // --- THE FIX IS HERE: Make sure this is INSIDE the runSimulation method ---
+        player.getServer().getCommands().performPrefixedCommand(
+                player.createCommandSourceStack(),
+                "kill @e[type=minecraft:text_display]"
+        );
 
         // Run the simulation, capped at 1 000 virtual ticks.
         level.runTickLoop(100);
