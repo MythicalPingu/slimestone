@@ -56,6 +56,22 @@ public class Slimestone implements ModInitializer {
                             })
                     )
 
+
+                    // /slimestone text1  — show the number 1 above the block you are looking at
+                    .then(Commands.literal("text1")
+                            .executes(context -> {
+                                ServerPlayer player = context.getSource().getPlayerOrException();
+                                BlockPos target = getTargetBlock(player);
+                                if (target == null) {
+                                    context.getSource().sendFailure(Component.literal(
+                                            "You must be looking at a block!"));
+                                    return 0;
+                                }
+                                spawnNumberDisplay(player, target);
+                                return 1;
+                            })
+                    )
+
                     // /slimestone compare  — force-finish the recording window now
                     .then(Commands.literal("compare")
                             .executes(context -> {
@@ -225,4 +241,40 @@ public class Slimestone implements ModInitializer {
 
         return hit.getType() == HitResult.Type.BLOCK ? hit.getBlockPos() : null;
     }
+
+    /**
+     * Removes all existing text displays, then spawns a centered vanilla text display
+     * at the block center with three stacked lines.
+     */
+    private void spawnNumberDisplay(ServerPlayer player, BlockPos targetPos) {
+        double x = targetPos.getX() + 0.5;
+        double y = targetPos.getY() + 0.5;
+        double z = targetPos.getZ() + 0.5;
+
+        // Remove every text display in the world first.
+        player.getServer().getCommands().performPrefixedCommand(
+                player.createCommandSourceStack(),
+                "kill @e[type=minecraft:text_display]"
+        );
+
+        // One display entity with three lines.
+        String displayText = "Gt 0\n3a\n12";
+        String jsonText = displayText
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n");
+
+        String summon = String.format(
+                "summon minecraft:text_display %.3f %.3f %.3f {text:'10 gt\\n3\\n5',billboard:\"center\",see_through:1b,shadow:0b,default_background:1b,alignment:\"center\",line_width:200}",
+                x, y, z, jsonText
+        );
+
+        player.getServer().getCommands().performPrefixedCommand(
+                player.createCommandSourceStack(),
+                summon
+        );
+
+        player.sendSystemMessage(Component.literal("§a[Slimestone] Placed text display:\nGt 0\n3a\n12"));
+    }
+
 }
