@@ -10,7 +10,7 @@ import java.util.List;
 
 public class MovingBlockDebugger {
 
-    public static final int RECORD_GT = 100;
+    public static final int RECORD_GT = 0;
 
     // Shifts the timestamp of recorded moving block events by +2 GT
     private static final int EVENT_DELAY = 2; //first instant of a moivng block if start command was to update an observer

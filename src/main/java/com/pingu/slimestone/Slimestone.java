@@ -3,6 +3,7 @@ package com.pingu.slimestone;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.coordinates.BlockPosArgument;
 import net.minecraft.core.BlockPos;
@@ -18,10 +19,17 @@ import net.minecraft.world.phys.Vec3;
 
 public class Slimestone implements ModInitializer {
 
+    private static Slimestone INSTANCE;
+
+    private static boolean trackingEnabled = false;
+    private static BlockPos trackedOrigin = null;
+    private static ServerPlayer trackedPlayer = null;
+
     @Override
     public void onInitialize() {
+        INSTANCE = this;
 
-        // ── Tick listener: auto-finalise real recording after RECORD_GT ticks ──
+        // Tick listener
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             long tick = server.overworld().getGameTime();
             ObserverDebugger.onServerTick(tick);
@@ -29,35 +37,47 @@ public class Slimestone implements ModInitializer {
             MovingBlockDebugger.onServerTick(tick);
         });
 
-        // ── Commands ──────────────────────────────────────────────────────────
+        // Re-run when a block is removed
+        PlayerBlockBreakEvents.AFTER.register((level, player, pos, state, blockEntity) -> {
+            if (trackingEnabled) {
+                refreshTrackedSimulation();
+            }
+        });
+
+        // Commands
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
             dispatcher.register(Commands.literal("slimestone")
 
-                    // /slimestone  — look at a block
+                    // /slimestone  -> toggle current session on/off
                     .executes(context -> {
                         ServerPlayer player = context.getSource().getPlayerOrException();
+
+                        if (trackingEnabled) {
+                            stopTracking(player);
+                            return 1;
+                        }
+
                         BlockPos target = getTargetBlock(player);
                         if (target == null) {
                             context.getSource().sendFailure(Component.literal(
                                     "You must be looking at a block, or specify coordinates!"));
                             return 0;
                         }
-                        runSimulation(player, target);
+
+                        startTracking(player, target);
                         return 1;
                     })
 
-                    // /slimestone <pos>  — explicit coordinates
+                    // /slimestone <pos> -> start/retarget session at explicit coordinates
                     .then(Commands.argument("pos", BlockPosArgument.blockPos())
                             .executes(context -> {
                                 ServerPlayer player = context.getSource().getPlayerOrException();
                                 BlockPos target = BlockPosArgument.getLoadedBlockPos(context, "pos");
-                                runSimulation(player, target);
+                                startTracking(player, target);
                                 return 1;
                             })
                     )
 
-
-                    // /slimestone text1  — show the number 1 above the block you are looking at
                     .then(Commands.literal("text1")
                             .executes(context -> {
                                 ServerPlayer player = context.getSource().getPlayerOrException();
@@ -72,14 +92,16 @@ public class Slimestone implements ModInitializer {
                             })
                     )
 
-                    // /slimestone compare  — force-finish the recording window now
                     .then(Commands.literal("compare")
                             .executes(context -> {
                                 ServerPlayer player = context.getSource().getPlayerOrException();
 
-                                boolean obsActive = ObserverDebugger.recordState == ObserverDebugger.RecordState.AWAITING || ObserverDebugger.recordState == ObserverDebugger.RecordState.RECORDING;
-                                boolean pisActive = PistonDebugger.recordState == PistonDebugger.RecordState.AWAITING || PistonDebugger.recordState == PistonDebugger.RecordState.RECORDING;
-                                boolean movActive = MovingBlockDebugger.recordState == MovingBlockDebugger.RecordState.AWAITING || MovingBlockDebugger.recordState == MovingBlockDebugger.RecordState.RECORDING;
+                                boolean obsActive = ObserverDebugger.recordState == ObserverDebugger.RecordState.AWAITING
+                                        || ObserverDebugger.recordState == ObserverDebugger.RecordState.RECORDING;
+                                boolean pisActive = PistonDebugger.recordState == PistonDebugger.RecordState.AWAITING
+                                        || PistonDebugger.recordState == PistonDebugger.RecordState.RECORDING;
+                                boolean movActive = MovingBlockDebugger.recordState == MovingBlockDebugger.RecordState.AWAITING
+                                        || MovingBlockDebugger.recordState == MovingBlockDebugger.RecordState.RECORDING;
 
                                 if (!obsActive && !pisActive && !movActive) {
                                     player.sendSystemMessage(Component.literal(
@@ -103,10 +125,10 @@ public class Slimestone implements ModInitializer {
                             })
                     )
 
-                    // /slimestone reset  — clear all state
                     .then(Commands.literal("reset")
                             .executes(context -> {
                                 ServerPlayer player = context.getSource().getPlayerOrException();
+                                stopTracking(player);
                                 ObserverDebugger.fullReset(player);
                                 PistonDebugger.fullReset(player);
                                 MovingBlockDebugger.fullReset(player);
@@ -117,12 +139,43 @@ public class Slimestone implements ModInitializer {
         });
     }
 
+    private void startTracking(ServerPlayer player, BlockPos origin) {
+        trackedPlayer = player;
+        trackedOrigin = origin.immutable();
+        trackingEnabled = true;
+
+        player.sendSystemMessage(Component.literal(
+                "§a[Slimestone] Tracking enabled at " + trackedOrigin.toShortString()));
+
+        runSimulation(player, trackedOrigin);
+    }
+
+    private void stopTracking(ServerPlayer player) {
+        trackingEnabled = false;
+        trackedOrigin = null;
+        trackedPlayer = null;
+
+        player.sendSystemMessage(Component.literal("§e[Slimestone] Tracking disabled."));
+    }
+
+    private void refreshTrackedSimulation() {
+        if (!trackingEnabled || trackedOrigin == null || trackedPlayer == null) {
+            return;
+        }
+        runSimulation(trackedPlayer, trackedOrigin);
+    }
+
+    public static void onWorldChanged() {
+        if (INSTANCE != null) {
+            INSTANCE.refreshTrackedSimulation();
+        }
+    }
+
     // ── Simulation ────────────────────────────────────────────────────────────
     private void runSimulation(ServerPlayer player, BlockPos targetPos) {
         player.sendSystemMessage(Component.literal(
                 "§a[Slimestone] Starting virtual simulation at " + targetPos.toShortString()));
 
-        // Clear expected list before every simulation so stale data never bleeds over.
         ObserverDebugger.resetExpected();
         PistonDebugger.resetExpected();
         MovingBlockDebugger.resetExpected();
@@ -130,7 +183,6 @@ public class Slimestone implements ModInitializer {
         VirtualLevel level = new VirtualLevel(player);
         int r = 50;
 
-        // Clone the real world into the virtual level.
         for (int x = -r; x <= r; x++) {
             for (int y = -r; y <= r; y++) {
                 for (int z = -r; z <= r; z++) {
@@ -154,16 +206,13 @@ public class Slimestone implements ModInitializer {
             return;
         }
 
-        // --- THE FIX IS HERE: Make sure this is INSIDE the runSimulation method ---
         player.getServer().getCommands().performPrefixedCommand(
                 player.createCommandSourceStack(),
                 "kill @e[type=minecraft:text_display]"
         );
 
-        // Run the simulation, capped at 1 000 virtual ticks.
         level.runTickLoop(100);
 
-        // ── Print what the simulation predicted (Observers) ──────────────────
         int expCount = ObserverDebugger.expected.size();
         player.sendSystemMessage(Component.literal(
                 "§e[Slimestone] Simulation predicted §f" + expCount
@@ -181,7 +230,6 @@ public class Slimestone implements ModInitializer {
             }
         }
 
-        // ── Print what the simulation predicted (Pistons) ────────────────────
         int expPisCount = PistonDebugger.expected.size();
         player.sendSystemMessage(Component.literal(
                 "§b[Slimestone] Simulation predicted §f" + expPisCount
@@ -199,7 +247,6 @@ public class Slimestone implements ModInitializer {
             }
         }
 
-        // ── Print what the simulation predicted (Moving Blocks) ──────────────
         int expMovCount = MovingBlockDebugger.expected.size();
         player.sendSystemMessage(Component.literal(
                 "§d[Slimestone] Simulation predicted §f" + expMovCount
@@ -217,8 +264,6 @@ public class Slimestone implements ModInitializer {
             }
         }
 
-        // Arm the recorder. The mixins will start capturing as soon as the
-        // first real observer/piston/moving block fires.
         ObserverDebugger.prepareForRealRecording(player);
         PistonDebugger.prepareForRealRecording(player);
         MovingBlockDebugger.prepareForRealRecording(player);
@@ -228,17 +273,11 @@ public class Slimestone implements ModInitializer {
                         + ObserverDebugger.RECORD_GT + "§a GT, or type §f/slimestone compare§a)"));
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
-
-    /**
-     * Server-side raycast: returns the block the player is looking at
-     * (up to 10 blocks away), or null if they're looking at air.
-     */
     private BlockPos getTargetBlock(ServerPlayer player) {
         double distance = 10.0;
-        Vec3 eyePos  = player.getEyePosition();
+        Vec3 eyePos = player.getEyePosition();
         Vec3 lookVec = player.getViewVector(1.0f);
-        Vec3 endPos  = eyePos.add(lookVec.x * distance, lookVec.y * distance, lookVec.z * distance);
+        Vec3 endPos = eyePos.add(lookVec.x * distance, lookVec.y * distance, lookVec.z * distance);
 
         ClipContext ctx = new ClipContext(
                 eyePos, endPos, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, player);
@@ -247,22 +286,16 @@ public class Slimestone implements ModInitializer {
         return hit.getType() == HitResult.Type.BLOCK ? hit.getBlockPos() : null;
     }
 
-    /**
-     * Removes all existing text displays, then spawns a centered vanilla text display
-     * at the block center with three stacked lines.
-     */
     private void spawnNumberDisplay(ServerPlayer player, BlockPos targetPos) {
         double x = targetPos.getX() + 0.5;
         double y = targetPos.getY() + 0.5;
         double z = targetPos.getZ() + 0.5;
 
-        // Remove every text display in the world first.
         player.getServer().getCommands().performPrefixedCommand(
                 player.createCommandSourceStack(),
                 "kill @e[type=minecraft:text_display]"
         );
 
-        // One display entity with three lines.
         String displayText = "Gt 0\n3a\n12";
         String jsonText = displayText
                 .replace("\\", "\\\\")
@@ -270,7 +303,8 @@ public class Slimestone implements ModInitializer {
                 .replace("\n", "\\n");
 
         String summon = String.format(
-                "summon minecraft:text_display %.3f %.3f %.3f {text:'10 gt\\n3\\n5',billboard:\"center\",see_through:1b,shadow:0b,default_background:1b,alignment:\"center\",line_width:200}",
+                java.util.Locale.US,
+                "summon minecraft:text_display %.3f %.3f %.3f {text:'{\"text\":\"%s\"}',billboard:\"center\",see_through:1b,shadow:0b,default_background:1b,alignment:\"center\",line_width:200}",
                 x, y, z, jsonText
         );
 
@@ -281,5 +315,4 @@ public class Slimestone implements ModInitializer {
 
         player.sendSystemMessage(Component.literal("§a[Slimestone] Placed text display:\nGt 0\n3a\n12"));
     }
-
 }

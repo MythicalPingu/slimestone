@@ -19,7 +19,7 @@ import java.util.List;
 public class ObserverDebugger {
 
     // How many game-ticks of observer events we track on both sides.
-    public static final int RECORD_GT = 100;
+    public static final int RECORD_GT = 0;
 
     // Vanilla observers always fire 2 GT after detecting a block change.
     // When the player places a block to trigger the machine, that placement

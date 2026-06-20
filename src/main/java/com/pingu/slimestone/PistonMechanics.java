@@ -330,6 +330,8 @@ public class PistonMechanics {
             BlockPos newPos = oldPos.relative(moveDir);
             BlockState movingState = vacatedSpots.get(oldPos);
 
+            level.recordDisplacement(oldPos, newPos);   // <-- add this line
+
             vacatedSpots.remove(newPos);
 
             PistonType type = pistonState.is(Blocks.STICKY_PISTON) ? PistonType.STICKY : PistonType.DEFAULT;

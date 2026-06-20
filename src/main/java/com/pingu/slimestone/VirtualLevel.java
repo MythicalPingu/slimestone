@@ -31,7 +31,24 @@ public class VirtualLevel {
 
     private final ServerPlayer player;
     private final Map<BlockPos, BlockState> blocks = new HashMap<>();
+    // Maps a block's current (possibly-displaced) position back to the real-world
+// position it originally started at, before any simulated pushes/pulls.
+    private final Map<BlockPos, BlockPos> originTracker = new HashMap<>();
 
+    /** Returns the real-world starting position for a block now at {@code current}. */
+    public BlockPos getOriginPos(BlockPos current) {
+        return originTracker.getOrDefault(current.immutable(), current.immutable());
+    }
+
+    void recordDisplacement(BlockPos oldPos, BlockPos newPos) {
+        BlockPos origin = getOriginPos(oldPos);
+        originTracker.remove(oldPos.immutable());
+        if (origin.equals(newPos)) {
+            originTracker.remove(newPos.immutable()); // moved back home, stop tracking
+        } else {
+            originTracker.put(newPos.immutable(), origin);
+        }
+    }
     // All piston extend/retract simulation lives here
     public final PistonMechanics pistonMechanics;
 
@@ -73,14 +90,16 @@ public class VirtualLevel {
         this.pistonMechanics = new PistonMechanics(this);
     }
     public void queueObserverDisplay(BlockPos pos) {
-        if (activatedObservers.add(pos.immutable())) {
-            pendingObserverDisplays.add(new PendingDisplay(pos.immutable(), ""));
+        BlockPos displayPos = getOriginPos(pos);
+        if (activatedObservers.add(displayPos.immutable())) {
+            pendingObserverDisplays.add(new PendingDisplay(displayPos.immutable(), ""));
         }
     }
 
     public void queuePistonDisplay(BlockPos pos, int blockCount) {
-        if (activatedPistons.add(pos.immutable())) {
-            pendingPistonDisplays.add(new PendingDisplay(pos.immutable(), ", " + blockCount));
+        BlockPos displayPos = getOriginPos(pos);
+        if (activatedPistons.add(displayPos.immutable())) {
+            pendingPistonDisplays.add(new PendingDisplay(displayPos.immutable(), "\nPl " + blockCount));
         }
     }
 
@@ -104,7 +123,7 @@ public class VirtualLevel {
 
         String summon = String.format(
                 java.util.Locale.US,
-                "summon minecraft:text_display %.3f %.3f %.3f {text:'\"%s\"',billboard:\"center\",see_through:1b,shadow:0b,default_background:1b,alignment:\"center\",line_width:200}",
+                "summon minecraft:text_display %.3f %.3f %.3f {text:'%s',billboard:\"center\",see_through:1b,shadow:0b,default_background:1b,alignment:\"center\",line_width:200}",
                 x, y, z, jsonText
         );
 

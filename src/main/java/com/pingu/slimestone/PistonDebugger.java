@@ -9,7 +9,7 @@ import java.util.List;
 
 public class PistonDebugger {
 
-    public static final int RECORD_GT = 100;
+    public static final int RECORD_GT = 0;
     private static final int TRIGGER_OFFSET = 0; // Piston events schedule instantly (GT 0)
     private static final int EVENT_DELAY = 0;
 
