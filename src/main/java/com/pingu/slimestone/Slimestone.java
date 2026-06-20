@@ -207,7 +207,7 @@ public class Slimestone implements ModInitializer {
         }
 
         player.getServer().getCommands().performPrefixedCommand(
-                player.createCommandSourceStack(),
+                player.createCommandSourceStack().withSuppressedOutput(),
                 "kill @e[type=minecraft:text_display]"
         );
 
@@ -308,8 +308,9 @@ public class Slimestone implements ModInitializer {
                 x, y, z, jsonText
         );
 
+// Chain .withSuppressedOutput() here to silence the command feedback
         player.getServer().getCommands().performPrefixedCommand(
-                player.createCommandSourceStack(),
+                player.createCommandSourceStack().withSuppressedOutput(),
                 summon
         );
 

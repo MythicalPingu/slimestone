@@ -128,7 +128,7 @@ public class VirtualLevel {
         );
 
         player.getServer().getCommands().performPrefixedCommand(
-                player.createCommandSourceStack(),
+                player.createCommandSourceStack().withSuppressedOutput(),
                 summon
         );
     }
