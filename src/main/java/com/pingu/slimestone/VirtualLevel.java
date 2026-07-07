@@ -53,9 +53,16 @@ public class VirtualLevel {
     public final PistonMechanics pistonMechanics;
 
     private final Set<BlockPos> activatedObservers = new HashSet<>();
-    private final Set<BlockPos> activatedPistons = new HashSet<>();
     private final List<PendingDisplay> pendingObserverDisplays = new ArrayList<>();
-    private final List<PendingDisplay> pendingPistonDisplays = new ArrayList<>();
+
+    // Pistons only ever log their first TWO actions total (in whatever order
+    // they actually occur - usually one Extend and one Retract, but a piston
+    // that starts already extended could see a Retract before an Extend).
+    private final Map<BlockPos, Integer> pistonActionCount = new HashMap<>();
+    private final List<PistonPendingEvent> pendingPistonDisplays = new ArrayList<>();
+    // Accumulates each piston's actions across the whole run; only spawned as a
+    // real text_display once the simulation finishes (see spawnPistonDisplays).
+    private final Map<BlockPos, PistonDisplayEntry> pistonDisplayEntries = new LinkedHashMap<>();
 
     public static class PendingDisplay {
         public final BlockPos pos;
@@ -65,6 +72,43 @@ public class VirtualLevel {
             this.pos = pos;
             this.extraText = extraText;
         }
+    }
+
+    private static class PistonPendingEvent {
+        final BlockPos pos;
+        final boolean extending;
+        final int blockCount;
+
+        PistonPendingEvent(BlockPos pos, boolean extending, int blockCount) {
+            this.pos = pos;
+            this.extending = extending;
+            this.blockCount = blockCount;
+        }
+    }
+
+    // A single logged Extend or Retract, with the raw (uncolored) tick+suffix
+    // pieces - colors are only decided once we know the total action count.
+    private static class PistonActionRecord {
+        final int tick;
+        final String suffix;
+        final boolean extending;
+        final int blockCount;
+
+        PistonActionRecord(int tick, String suffix, boolean extending, int blockCount) {
+            this.tick = tick;
+            this.suffix = suffix;
+            this.extending = extending;
+            this.blockCount = blockCount;
+        }
+    }
+
+    // Passed as blockCount when a logged action has no meaningful push/pull
+    // number to show (e.g. a normal piston's retract, which never pulls
+    // anything) - the second-line renderer skips these entirely.
+    public static final int NO_COUNT = -1;
+
+    private static class PistonDisplayEntry {
+        final List<PistonActionRecord> actions = new ArrayList<>(); // at most 2, chronological order
     }
 
     // Package-private so the Resolver can verify moving pistons
@@ -96,11 +140,12 @@ public class VirtualLevel {
         }
     }
 
-    public void queuePistonDisplay(BlockPos pos, int blockCount) {
-        BlockPos displayPos = getOriginPos(pos);
-        if (activatedPistons.add(displayPos.immutable())) {
-            pendingPistonDisplays.add(new PendingDisplay(displayPos.immutable(), "\nPl " + blockCount));
-        }
+    public void queuePistonDisplay(BlockPos pos, int blockCount, boolean extending) {
+        BlockPos displayPos = getOriginPos(pos).immutable();
+        int count = pistonActionCount.getOrDefault(displayPos, 0);
+        if (count >= 2) return; // only the first two actions for this piston are ever logged
+        pistonActionCount.put(displayPos, count + 1);
+        pendingPistonDisplays.add(new PistonPendingEvent(displayPos, extending, blockCount));
     }
 
     private void flushDisplays(List<PendingDisplay> displays, int tick) {
@@ -110,10 +155,57 @@ public class VirtualLevel {
         for (int i = 0; i < displays.size(); i++) {
             PendingDisplay d = displays.get(i);
             String suffix = useSuffix ? String.valueOf((char) ('a' + i)) : "";
-            String text = "Gt " + tick + suffix + d.extraText;
+            String text = tick + suffix + d.extraText;
             spawnGtDisplay(d.pos, text);
         }
         displays.clear();
+    }
+
+    // Records this tick's Extend/Retract events into each piston's running
+    // display entry, in raw (uncolored) form. Colors are only decided once
+    // we know how many actions that piston ends up with in total.
+    private void flushPistonDisplays(int tick) {
+        if (pendingPistonDisplays.isEmpty()) return;
+        boolean useSuffix = pendingPistonDisplays.size() > 1; // Only use a,b,c if more than 1 this tick
+
+        for (int i = 0; i < pendingPistonDisplays.size(); i++) {
+            PistonPendingEvent e = pendingPistonDisplays.get(i);
+            String suffix = useSuffix ? String.valueOf((char) ('a' + i)) : "";
+
+            PistonDisplayEntry entry = pistonDisplayEntries.computeIfAbsent(e.pos, p -> new PistonDisplayEntry());
+            entry.actions.add(new PistonActionRecord(tick, suffix, e.extending, e.blockCount));
+        }
+        pendingPistonDisplays.clear();
+    }
+
+    // Spawns the actual text_display entities once the whole simulation is
+    // done. Two actions land on one row colored by type (§e extend / §a
+    // retract); a piston with only a single action ever gets that one
+    // number recolored §6 (orange) instead.
+    private void spawnPistonDisplays() {
+        for (Map.Entry<BlockPos, PistonDisplayEntry> mapEntry : pistonDisplayEntries.entrySet()) {
+            List<PistonActionRecord> actions = mapEntry.getValue().actions;
+            if (actions.isEmpty()) continue;
+
+            StringBuilder firstLine = new StringBuilder();
+            for (int i = 0; i < actions.size(); i++) {
+                PistonActionRecord a = actions.get(i);
+                String color = actions.size() == 1 ? "§6" : (a.extending ? "§e" : "§a");
+                if (i > 0) firstLine.append(" ");
+                firstLine.append(color).append(a.tick).append(a.suffix);
+            }
+
+            StringBuilder secondLine = new StringBuilder();
+            for (PistonActionRecord a : actions) {
+                if (a.blockCount == NO_COUNT) continue; // nothing meaningful to show for this action
+                String countColor = a.blockCount > 12 ? "§c" : (a.extending ? "§e" : "§a");
+                if (secondLine.length() > 0) secondLine.append(" ");
+                secondLine.append(countColor).append(a.blockCount);
+            }
+            String text = firstLine + "\n" + secondLine;
+            spawnGtDisplay(mapEntry.getKey(), text);
+        }
+        pistonDisplayEntries.clear();
     }
 
     private void spawnGtDisplay(BlockPos targetPos, String jsonText) {
@@ -123,7 +215,7 @@ public class VirtualLevel {
 
         String summon = String.format(
                 java.util.Locale.US,
-                "summon minecraft:text_display %.3f %.3f %.3f {text:'%s',billboard:\"center\",see_through:1b,shadow:0b,default_background:1b,alignment:\"center\",line_width:200}",
+                "summon minecraft:text_display %.3f %.3f %.3f {text:'%s',billboard:\"center\",see_through:1b,shadow:0b,default_background:0b,background:0,alignment:\"center\",line_width:200}",
                 x, y, z, jsonText
         );
 
@@ -266,7 +358,7 @@ public class VirtualLevel {
             }
 
             // FLUSH PISTON LABELS HERE
-            flushDisplays(pendingPistonDisplays, currentTick);
+            flushPistonDisplays(currentTick);
 
             // ── PHASE 3: BLOCK ENTITIES ────────────────────────────────────────
             currentPhase = "BLOCK ENTITIES";
@@ -284,6 +376,9 @@ public class VirtualLevel {
                 break;
             }
         }
+
+        // Simulation window is over - spawn each piston's merged Extend/Retract row now.
+        spawnPistonDisplays();
     }
     public int getCurrentTick() {
         return currentTick;

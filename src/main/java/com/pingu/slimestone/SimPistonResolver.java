@@ -23,6 +23,25 @@ public class SimPistonResolver {
     List<BlockPos> toPush = new ArrayList<>();
     List<BlockPos> toDestroy = new ArrayList<>();
 
+    // The real, vanilla-accurate piston push limit. Checked exactly once, in
+    // resolve(), after the full structure (including all sticky branches)
+    // has been discovered - see pushLimitExceeded below for why.
+    public static final int MAX_PUSH = 12;
+
+    // Purely defensive: bounds traversal on a pathological/malformed
+    // structure so addBlockLine can't loop forever. Deliberately far above
+    // MAX_PUSH so it never fires on a normal (even over-the-limit) build;
+    // tripping it is a hard failure, not a "too many blocks" failure, so it
+    // does NOT set pushLimitExceeded.
+    private static final int SAFETY_TRAVERSAL_CAP = 512;
+
+    // True only when resolve() failed because the fully-discovered structure
+    // exceeded MAX_PUSH blocks - as opposed to failing because it hit an
+    // unpushable block, bedrock, etc. Callers use this to decide whether to
+    // still surface the attempted block count for display purposes, even
+    // though the move itself must not be executed.
+    private boolean pushLimitExceeded = false;
+
     public SimPistonResolver(VirtualLevel level, BlockPos pistonPos, Direction pistonDirection, boolean extending) {
         this.level = level;
         this.pistonPos = pistonPos;
@@ -41,6 +60,7 @@ public class SimPistonResolver {
     public boolean resolve() {
         toPush.clear();
         toDestroy.clear();
+        pushLimitExceeded = false;
         BlockState startState = level.getBlockState(startPos);
 
         if (startState.isAir()) return true;
@@ -68,7 +88,31 @@ public class SimPistonResolver {
                 return false;
             }
         }
+
+        // Only now, with the ENTIRE structure (including every sticky branch)
+        // discovered, do we know the true block count. toPush is left fully
+        // populated on purpose so callers can still read the real attempted
+        // size for display - resolve() returning false is what stops the
+        // move from actually being executed.
+        if (toPush.size() > MAX_PUSH) {
+            this.pushLimitExceeded = true;
+            this.failurePos = startPos;
+            this.failureReason = "Piston push limit (" + MAX_PUSH + ") exceeded: attempted " + toPush.size() + " blocks";
+            return false;
+        }
+
         return true;
+    }
+
+    /**
+     * True only when the last resolve() call failed specifically because the
+     * fully-discovered structure needed more than {@link #MAX_PUSH} blocks -
+     * not for other failure reasons (blocked by bedrock, can't drag a block
+     * entity, etc). {@link #toPush} still holds the true attempted count in
+     * this case, for display purposes.
+     */
+    public boolean isPushLimitExceeded() {
+        return pushLimitExceeded;
     }
 
     private boolean addBlockLine(BlockPos pos, Direction dir) {
@@ -91,9 +135,9 @@ public class SimPistonResolver {
 
             state = nextState;
             count++;
-            if (count + toPush.size() > 12) {
+            if (count + toPush.size() > SAFETY_TRAVERSAL_CAP) {
                 this.failurePos = pos;
-                this.failureReason = "Piston push limit (12) reached backwards";
+                this.failureReason = "Traversal safety limit reached backwards";
                 return false;
             }
         }
@@ -131,9 +175,9 @@ public class SimPistonResolver {
                 return true;
             }
 
-            if (toPush.size() >= 12) {
+            if (toPush.size() >= SAFETY_TRAVERSAL_CAP) {
                 this.failurePos = nextPos;
-                this.failureReason = "Piston push limit (12) reached forwards";
+                this.failureReason = "Traversal safety limit reached forwards";
                 return false;
             }
             toPush.add(nextPos);

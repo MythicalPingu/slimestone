@@ -63,6 +63,13 @@ public class PistonMechanics {
                     level.blockEvents.add(event);
                     // REMOVED: PistonDebugger.logExpected(...)
                 }
+            } else if (resolver.isPushLimitExceeded()) {
+                // In-game, a piston that would need to move more than the 12-block
+                // limit simply never extends at all - no event, no animation, no
+                // moved blocks. We still want the debug display to show what it
+                // *tried* to grab, so surface it here since no BlockEvent (and
+                // therefore no triggerPistonEvent call) will happen for this piston.
+                level.queuePistonDisplay(pos, resolver.toPush.size(), true);
             }
         } else if (!powered && extended) {
             //level.log("Piston unpowered at " + pos.toShortString() + ". Queuing Contract Event.");
@@ -155,17 +162,20 @@ public class PistonMechanics {
             if (!resolver.resolve()) {
                 //level.log("§cExtend failed: " + resolver.getFailureReason() + " (Pos: " +
                 //        (resolver.getFailurePos() != null ? resolver.getFailurePos().toShortString() : "N/A") + ")");
+                if (resolver.isPushLimitExceeded()) {
+                    // The structure may have grown between checkIfExtend queuing this
+                    // event and it actually draining here - re-check and still show
+                    // the true attempted count. Either way, do NOT call moveBlocks():
+                    // nothing may move for a push this large.
+                    level.queuePistonDisplay(pos, resolver.toPush.size(), true);
+                }
                 return;
             }
 
             // --- SLIMESTONE DISPLAY LOGIC ---
             int pushCount = resolver.toPush.size();
-            boolean isSticky = currentState.getBlock() == Blocks.STICKY_PISTON;
 
-            // Log if it's a normal piston OR if it's a sticky piston pushing > 0 blocks
-            if (!isSticky || pushCount > 0) {
-                level.queuePistonDisplay(pos, pushCount);
-            }
+            level.queuePistonDisplay(pos, pushCount, true);
             // --------------------------------
 
             PistonDebugger.logExpected(pos, true, level.getCurrentTick());
@@ -222,6 +232,13 @@ public class PistonMechanics {
                     //level.log("Instant finalTick on mid-push block at " + twoAheadPos.toShortString());
                     twoAheadBE.finalTick(level);
                     instantFinished = true;
+
+                    // --- SLIMESTONE DISPLAY LOGIC ---
+                    // Retract completed by instantly finishing the still-moving
+                    // pushed block rather than resolving a fresh pull - no new
+                    // blocks were pulled, but the retraction itself still happened
+                    // and must be logged.
+                    level.queuePistonDisplay(pos, 0, false);
                 }
 
                 if (!instantFinished) {
@@ -237,7 +254,7 @@ public class PistonMechanics {
 
                         // --- SLIMESTONE DISPLAY LOGIC ---
                         // Pulled nothing (0 blocks)
-                        level.queuePistonDisplay(pos, 0);
+                        level.queuePistonDisplay(pos, 0, false);
                     } else {
                         BlockState headStateBeforeResolve = level.getBlockState(headPos);
                         if (headStateBeforeResolve.is(Blocks.PISTON_HEAD)) {
@@ -250,21 +267,32 @@ public class PistonMechanics {
                         if (resolver.resolve()) {
                             // --- SLIMESTONE DISPLAY LOGIC ---
                             // Successfully resolved a pull
-                            level.queuePistonDisplay(pos, resolver.toPush.size());
+                            level.queuePistonDisplay(pos, resolver.toPush.size(), false);
 
                             moveBlocks(pos, currentState, facing, false, resolver);
                         } else {
                             //level.log("§cRetract pull failed: " + resolver.getFailureReason());
 
                             // --- SLIMESTONE DISPLAY LOGIC ---
-                            // Pull failed (e.g., hit an immovable block) so it pulled 0 blocks
-                            level.queuePistonDisplay(pos, 0);
+                            // A push-limit failure still has a real attempted count worth
+                            // showing (nothing gets pulled in-game, but we want to see how
+                            // many blocks it tried to grab). Any other failure (blocked by
+                            // an immovable block, etc.) pulled nothing, so show 0 as before.
+                            if (resolver.isPushLimitExceeded()) {
+                                level.queuePistonDisplay(pos, resolver.toPush.size(), false);
+                            } else {
+                                level.queuePistonDisplay(pos, 0, false);
+                            }
                         }
                     }
                 }
             } else {
                 // Normal piston
                 removeHeadBlock(headPos);
+
+                // --- SLIMESTONE DISPLAY LOGIC ---
+                // Normal pistons never pull anything on retract - no count to show
+                level.queuePistonDisplay(pos, VirtualLevel.NO_COUNT, false);
             }
         }
     }

@@ -10,6 +10,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -25,6 +26,15 @@ public class Slimestone implements ModInitializer {
     private static BlockPos trackedOrigin = null;
     private static ServerPlayer trackedPlayer = null;
 
+    // Radius (in blocks) captured into the virtual level - also the region we
+    // scan when checking whether the real world has settled (see isWorldSettled).
+    private static final int SIM_RADIUS = 50;
+
+    // Set whenever a placement/break reports a world change. The actual
+    // re-simulation is deferred until the real world stops doing anything
+    // that would still change on its own - checked once per tick below.
+    private static boolean pendingSimRun = false;
+
     @Override
     public void onInitialize() {
         INSTANCE = this;
@@ -35,12 +45,22 @@ public class Slimestone implements ModInitializer {
             ObserverDebugger.onServerTick(tick);
             PistonDebugger.onServerTick(tick);
             MovingBlockDebugger.onServerTick(tick);
+
+            if (pendingSimRun && trackingEnabled && trackedOrigin != null && trackedPlayer != null) {
+                if (isWorldSettled(trackedPlayer, trackedOrigin)) {
+                    pendingSimRun = false;
+                    runSimulation(trackedPlayer, trackedOrigin);
+                }
+                // else: a piston is still travelling, or an observer/lamp has a
+                // delayed tick still pending - stay pending and check again
+                // next tick.
+            }
         });
 
         // Re-run when a block is removed
         PlayerBlockBreakEvents.AFTER.register((level, player, pos, state, blockEntity) -> {
             if (trackingEnabled) {
-                refreshTrackedSimulation();
+                pendingSimRun = true;
             }
         });
 
@@ -154,20 +174,50 @@ public class Slimestone implements ModInitializer {
         trackingEnabled = false;
         trackedOrigin = null;
         trackedPlayer = null;
+        pendingSimRun = false;
 
         //player.sendSystemMessage(Component.literal("§e[Slimestone] Tracking disabled."));
     }
 
-    private void refreshTrackedSimulation() {
-        if (!trackingEnabled || trackedOrigin == null || trackedPlayer == null) {
-            return;
+    /**
+     * True once the real world around {@code origin} has stopped doing
+     * anything that would still change on its own next tick. Placing or
+     * breaking a block can kick off vanilla updates that span several ticks -
+     * a piston takes 2 ticks to finish travelling, an observer's pulse takes
+     * 2 ticks to fall, a redstone lamp's turn-off is delayed 4 ticks - so
+     * running the simulation the instant a block changes can snapshot a
+     * transient, not-yet-settled state. This scans the same region the
+     * simulation itself captures for a piston still mid-travel (a
+     * MOVING_PISTON block present) or an observer/lamp with a scheduled tick
+     * still pending.
+     */
+    private boolean isWorldSettled(ServerPlayer player, BlockPos origin) {
+        Level realLevel = player.level();
+
+        for (int x = -SIM_RADIUS; x <= SIM_RADIUS; x++) {
+            for (int y = -SIM_RADIUS; y <= SIM_RADIUS; y++) {
+                for (int z = -SIM_RADIUS; z <= SIM_RADIUS; z++) {
+                    BlockPos p = origin.offset(x, y, z);
+                    BlockState state = realLevel.getBlockState(p);
+
+                    if (state.is(Blocks.MOVING_PISTON)) {
+                        return false;
+                    }
+                    if (state.is(Blocks.OBSERVER) && realLevel.getBlockTicks().hasScheduledTick(p, Blocks.OBSERVER)) {
+                        return false;
+                    }
+                    if (state.is(Blocks.REDSTONE_LAMP) && realLevel.getBlockTicks().hasScheduledTick(p, Blocks.REDSTONE_LAMP)) {
+                        return false;
+                    }
+                }
+            }
         }
-        runSimulation(trackedPlayer, trackedOrigin);
+        return true;
     }
 
     public static void onWorldChanged() {
-        if (INSTANCE != null) {
-            INSTANCE.refreshTrackedSimulation();
+        if (INSTANCE != null && trackingEnabled) {
+            pendingSimRun = true;
         }
     }
 
@@ -181,11 +231,10 @@ public class Slimestone implements ModInitializer {
         MovingBlockDebugger.resetExpected();
 
         VirtualLevel level = new VirtualLevel(player);
-        int r = 50;
 
-        for (int x = -r; x <= r; x++) {
-            for (int y = -r; y <= r; y++) {
-                for (int z = -r; z <= r; z++) {
+        for (int x = -SIM_RADIUS; x <= SIM_RADIUS; x++) {
+            for (int y = -SIM_RADIUS; y <= SIM_RADIUS; y++) {
+                for (int z = -SIM_RADIUS; z <= SIM_RADIUS; z++) {
                     BlockPos p = targetPos.offset(x, y, z);
                     level.setBlockRaw(p, player.level().getBlockState(p));
                 }
