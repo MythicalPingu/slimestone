@@ -247,13 +247,12 @@ public class SimPistonResolver {
                 state.is(Blocks.RESPAWN_ANCHOR) || state.is(Blocks.REINFORCED_DEEPSLATE) || state.is(Blocks.BEDROCK)) {
             return false;
         }
+        if (state.is(Blocks.PISTON) || state.is(Blocks.STICKY_PISTON)) {
+            return !state.getValue(PistonBaseBlock.EXTENDED);
+        }
         PushReaction reaction = state.getPistonPushReaction();
-        if (reaction == PushReaction.BLOCK && !state.is(Blocks.PISTON) && !state.is(Blocks.STICKY_PISTON)) {
-            return false;
-        }
-        if (reaction == PushReaction.DESTROY) {
-            return false;
-        }
+        if (reaction == PushReaction.BLOCK) return false;
+        if (reaction == PushReaction.DESTROY) return false;
         return true;
     }
 

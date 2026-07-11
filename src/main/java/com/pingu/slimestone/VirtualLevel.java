@@ -52,8 +52,14 @@ public class VirtualLevel {
     // All piston extend/retract simulation lives here
     public final PistonMechanics pistonMechanics;
 
-    private final Set<BlockPos> activatedObservers = new HashSet<>();
-    private final List<PendingDisplay> pendingObserverDisplays = new ArrayList<>();
+    // Observers only ever log their first TWO actions total (in whatever order
+    // they actually occur - normally an ON pulse-start followed by an OFF
+    // pulse-end, one per cycle).
+    private final Map<BlockPos, Integer> observerActionCount = new HashMap<>();
+    private final List<ObserverPendingEvent> pendingObserverDisplays = new ArrayList<>();
+    // Accumulates each observer's actions across the whole run; only spawned as
+    // a real text_display once the simulation finishes (see spawnObserverDisplays).
+    private final Map<BlockPos, ObserverDisplayEntry> observerDisplayEntries = new LinkedHashMap<>();
 
     // Pistons only ever log their first TWO actions total (in whatever order
     // they actually occur - usually one Extend and one Retract, but a piston
@@ -64,14 +70,33 @@ public class VirtualLevel {
     // real text_display once the simulation finishes (see spawnPistonDisplays).
     private final Map<BlockPos, PistonDisplayEntry> pistonDisplayEntries = new LinkedHashMap<>();
 
-    public static class PendingDisplay {
-        public final BlockPos pos;
-        public final String extraText;
+    private static class ObserverPendingEvent {
+        final BlockPos pos;
+        final boolean poweredOn; // true = turned ON (light blue), false = turned OFF (pink)
 
-        public PendingDisplay(BlockPos pos, String extraText) {
+        ObserverPendingEvent(BlockPos pos, boolean poweredOn) {
             this.pos = pos;
-            this.extraText = extraText;
+            this.poweredOn = poweredOn;
         }
+    }
+
+    // A single logged ON/OFF action, with the raw (uncolored) tick+suffix
+    // piece - color is decided at spawn time from poweredOn alone (no
+    // "only one action" special case, unlike pistons).
+    private static class ObserverActionRecord {
+        final int tick;
+        final String suffix;
+        final boolean poweredOn;
+
+        ObserverActionRecord(int tick, String suffix, boolean poweredOn) {
+            this.tick = tick;
+            this.suffix = suffix;
+            this.poweredOn = poweredOn;
+        }
+    }
+
+    private static class ObserverDisplayEntry {
+        final List<ObserverActionRecord> actions = new ArrayList<>(); // at most 2, chronological order
     }
 
     private static class PistonPendingEvent {
@@ -133,11 +158,12 @@ public class VirtualLevel {
         this.player = player;
         this.pistonMechanics = new PistonMechanics(this);
     }
-    public void queueObserverDisplay(BlockPos pos) {
-        BlockPos displayPos = getOriginPos(pos);
-        if (activatedObservers.add(displayPos.immutable())) {
-            pendingObserverDisplays.add(new PendingDisplay(displayPos.immutable(), ""));
-        }
+    public void queueObserverDisplay(BlockPos pos, boolean poweredOn) {
+        BlockPos displayPos = getOriginPos(pos).immutable();
+        int count = observerActionCount.getOrDefault(displayPos, 0);
+        if (count >= 2) return; // only the first two actions for this observer are ever logged
+        observerActionCount.put(displayPos, count + 1);
+        pendingObserverDisplays.add(new ObserverPendingEvent(displayPos, poweredOn));
     }
 
     public void queuePistonDisplay(BlockPos pos, int blockCount, boolean extending) {
@@ -148,17 +174,41 @@ public class VirtualLevel {
         pendingPistonDisplays.add(new PistonPendingEvent(displayPos, extending, blockCount));
     }
 
-    private void flushDisplays(List<PendingDisplay> displays, int tick) {
-        if (displays.isEmpty()) return;
-        boolean useSuffix = displays.size() > 1; // Only use a,b,c if more than 1 activated
+    // Records this tick's ON/OFF events into each observer's running
+    // display entry, in raw (uncolored) form - mirrors flushPistonDisplays.
+    private void flushObserverDisplays(int tick) {
+        if (pendingObserverDisplays.isEmpty()) return;
+        boolean useSuffix = pendingObserverDisplays.size() > 1; // Only use a,b,c if more than 1 this tick
 
-        for (int i = 0; i < displays.size(); i++) {
-            PendingDisplay d = displays.get(i);
+        for (int i = 0; i < pendingObserverDisplays.size(); i++) {
+            ObserverPendingEvent e = pendingObserverDisplays.get(i);
             String suffix = useSuffix ? String.valueOf((char) ('a' + i)) : "";
-            String text = tick + suffix + d.extraText;
-            spawnGtDisplay(d.pos, text);
+
+            ObserverDisplayEntry entry = observerDisplayEntries.computeIfAbsent(e.pos, p -> new ObserverDisplayEntry());
+            entry.actions.add(new ObserverActionRecord(tick, suffix, e.poweredOn));
         }
-        displays.clear();
+        pendingObserverDisplays.clear();
+    }
+
+    // Spawns the actual text_display entities once the whole simulation is
+    // done. Up to two actions land on one row, colored by type (§b light
+    // blue for turning ON / §d pink for turning OFF). Unlike pistons, there
+    // is no special-case recoloring when only one action is found.
+    private void spawnObserverDisplays() {
+        for (Map.Entry<BlockPos, ObserverDisplayEntry> mapEntry : observerDisplayEntries.entrySet()) {
+            List<ObserverActionRecord> actions = mapEntry.getValue().actions;
+            if (actions.isEmpty()) continue;
+
+            StringBuilder line = new StringBuilder();
+            for (int i = 0; i < actions.size(); i++) {
+                ObserverActionRecord a = actions.get(i);
+                String color = a.poweredOn ? "§b" : "§d";
+                if (i > 0) line.append(" ");
+                line.append(color).append(a.tick).append(a.suffix);
+            }
+            spawnGtDisplay(mapEntry.getKey(), line.toString());
+        }
+        observerDisplayEntries.clear();
     }
 
     // Records this tick's Extend/Retract events into each piston's running
@@ -345,7 +395,7 @@ public class VirtualLevel {
             }
 
             // FLUSH OBSERVER LABELS HERE
-            flushDisplays(pendingObserverDisplays, currentTick);
+            flushObserverDisplays(currentTick);
 
             // ── PHASE 2: BLOCK EVENTS ─────────────────────────────────────────
             currentPhase = "BLOCK EVENTS";
@@ -379,6 +429,8 @@ public class VirtualLevel {
 
         // Simulation window is over - spawn each piston's merged Extend/Retract row now.
         spawnPistonDisplays();
+        // ...and each observer's merged ON/OFF row.
+        spawnObserverDisplays();
     }
     public int getCurrentTick() {
         return currentTick;
@@ -408,6 +460,10 @@ public class VirtualLevel {
             //log("§3[Observer] " + pos.toShortString() + " → POWERED=false (pulse end)");
             ObserverDebugger.logExpected(pos, false, currentTick);
 
+            // --- Display the GT for this OFF action, if within the first two ---
+            queueObserverDisplay(pos, false);
+            // --------------------------------------------------
+
             // 1. Emit Shape Updates to immediate neighbors
             fireShapeUpdates(pos);
             // 2. Emit Redstone Updates to the back block and its neighbors
@@ -418,8 +474,8 @@ public class VirtualLevel {
             //log("§3[Observer] " + pos.toShortString() + " → POWERED=true (pulse start)");
             ObserverDebugger.logExpected(pos, true, currentTick);
 
-            // --- NEW: Display the GT if it's the first time ---
-            queueObserverDisplay(pos);
+            // --- Display the GT for this ON action, if within the first two ---
+            queueObserverDisplay(pos, true);
             // --------------------------------------------------
 
             fireShapeUpdates(pos);
