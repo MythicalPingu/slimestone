@@ -18,6 +18,11 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.Set;
+
 public class Slimestone implements ModInitializer {
 
     private static Slimestone INSTANCE;
@@ -25,10 +30,6 @@ public class Slimestone implements ModInitializer {
     private static boolean trackingEnabled = false;
     private static BlockPos trackedOrigin = null;
     private static ServerPlayer trackedPlayer = null;
-
-    // Radius (in blocks) captured into the virtual level - also the region we
-    // scan when checking whether the real world has settled (see isWorldSettled).
-    private static final int SIM_RADIUS = 50;
 
     // Set whenever a placement/break reports a world change. The actual
     // re-simulation is deferred until the real world stops doing anything
@@ -94,20 +95,6 @@ public class Slimestone implements ModInitializer {
                                 ServerPlayer player = context.getSource().getPlayerOrException();
                                 BlockPos target = BlockPosArgument.getLoadedBlockPos(context, "pos");
                                 startTracking(player, target);
-                                return 1;
-                            })
-                    )
-
-                    .then(Commands.literal("text1")
-                            .executes(context -> {
-                                ServerPlayer player = context.getSource().getPlayerOrException();
-                                BlockPos target = getTargetBlock(player);
-                                if (target == null) {
-                                    context.getSource().sendFailure(Component.literal(
-                                            "You must be looking at a block!"));
-                                    return 0;
-                                }
-                                spawnNumberDisplay(player, target);
                                 return 1;
                             })
                     )
@@ -194,25 +181,84 @@ public class Slimestone implements ModInitializer {
     private boolean isWorldSettled(ServerPlayer player, BlockPos origin) {
         Level realLevel = player.level();
 
-        for (int x = -SIM_RADIUS; x <= SIM_RADIUS; x++) {
-            for (int y = -SIM_RADIUS; y <= SIM_RADIUS; y++) {
-                for (int z = -SIM_RADIUS; z <= SIM_RADIUS; z++) {
-                    BlockPos p = origin.offset(x, y, z);
-                    BlockState state = realLevel.getBlockState(p);
+        for (BlockPos p : computeContraptionRegion(realLevel, origin)) {
+            BlockState state = realLevel.getBlockState(p);
 
-                    if (state.is(Blocks.MOVING_PISTON)) {
-                        return false;
-                    }
-                    if (state.is(Blocks.OBSERVER) && realLevel.getBlockTicks().hasScheduledTick(p, Blocks.OBSERVER)) {
-                        return false;
-                    }
-                    if (state.is(Blocks.REDSTONE_LAMP) && realLevel.getBlockTicks().hasScheduledTick(p, Blocks.REDSTONE_LAMP)) {
-                        return false;
+            if (state.is(Blocks.MOVING_PISTON)) {
+                return false;
+            }
+            if (state.is(Blocks.OBSERVER) && realLevel.getBlockTicks().hasScheduledTick(p, Blocks.OBSERVER)) {
+                return false;
+            }
+            if (state.is(Blocks.REDSTONE_LAMP) && realLevel.getBlockTicks().hasScheduledTick(p, Blocks.REDSTONE_LAMP)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Builds the set of positions that make up the contraption at {@code origin},
+     * instead of scanning a fixed cube. Starts from a 5x5x5 cube (radius 2)
+     * around the origin, always fully included. From there it flood-fills
+     * outward: every non-air block queues up its surrounding 3x3x3 cube, plus
+     * the six positions exactly 2 blocks away along a single axis (+x/-x,
+     * +y/-y, +z/-z). A block that is air is still captured - so a piston has
+     * room to push into it - but it's a dead end: the fill does not expand
+     * past it. Only non-air blocks propagate the search further.
+     */
+    private static Set<BlockPos> computeContraptionRegion(Level level, BlockPos origin) {
+        Set<BlockPos> visited = new HashSet<>();
+        Deque<BlockPos> queue = new ArrayDeque<>();
+
+        for (int x = -2; x <= 2; x++) {
+            for (int y = -2; y <= 2; y++) {
+                for (int z = -2; z <= 2; z++) {
+                    BlockPos p = origin.offset(x, y, z);
+                    if (visited.add(p)) {
+                        queue.add(p);
                     }
                 }
             }
         }
-        return true;
+
+        while (!queue.isEmpty()) {
+            BlockPos p = queue.poll();
+
+            // Air is captured but is not a valid expansion point - stop here.
+            if (level.getBlockState(p).isAir()) {
+                continue;
+            }
+
+            // 3x3x3 cube around p.
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dz = -1; dz <= 1; dz++) {
+                        if (dx == 0 && dy == 0 && dz == 0) {
+                            continue;
+                        }
+                        BlockPos n = p.offset(dx, dy, dz);
+                        if (visited.add(n)) {
+                            queue.add(n);
+                        }
+                    }
+                }
+            }
+
+            // Plus the six positions exactly 2 away along a single axis.
+            BlockPos[] axisExtensions = {
+                    p.offset(2, 0, 0), p.offset(-2, 0, 0),
+                    p.offset(0, 2, 0), p.offset(0, -2, 0),
+                    p.offset(0, 0, 2), p.offset(0, 0, -2)
+            };
+            for (BlockPos n : axisExtensions) {
+                if (visited.add(n)) {
+                    queue.add(n);
+                }
+            }
+        }
+
+        return visited;
     }
 
     public static void onWorldChanged() {
@@ -232,13 +278,8 @@ public class Slimestone implements ModInitializer {
 
         VirtualLevel level = new VirtualLevel(player);
 
-        for (int x = -SIM_RADIUS; x <= SIM_RADIUS; x++) {
-            for (int y = -SIM_RADIUS; y <= SIM_RADIUS; y++) {
-                for (int z = -SIM_RADIUS; z <= SIM_RADIUS; z++) {
-                    BlockPos p = targetPos.offset(x, y, z);
-                    level.setBlockRaw(p, player.level().getBlockState(p));
-                }
-            }
+        for (BlockPos p : computeContraptionRegion(player.level(), targetPos)) {
+            level.setBlockRaw(p, player.level().getBlockState(p));
         }
 
         BlockState targetState = level.getBlockState(targetPos);
@@ -260,7 +301,7 @@ public class Slimestone implements ModInitializer {
                 "kill @e[type=minecraft:text_display]"
         );
 
-        level.runTickLoop(100);
+        level.runTickLoop(1000);
 
         int expCount = ObserverDebugger.expected.size();
         //player.sendSystemMessage(Component.literal(
