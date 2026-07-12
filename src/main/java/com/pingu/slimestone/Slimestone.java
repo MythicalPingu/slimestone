@@ -1,5 +1,6 @@
 package com.pingu.slimestone;
 
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
@@ -35,6 +36,14 @@ public class Slimestone implements ModInitializer {
     // re-simulation is deferred until the real world stops doing anything
     // that would still change on its own - checked once per tick below.
     private static boolean pendingSimRun = false;
+
+    // The VirtualLevel from the most recently completed simulation run, kept
+    // around so /slimestone poi <gt> can look up its recorded actions.
+    private static VirtualLevel lastSimLevel = null;
+
+    // Remembers the last window used with /poi <gt> <window>, so a bare
+    // /poi <gt> can reuse it. Starts at 3 until the player sets one.
+    private static int lastPoiWindow = 3;
 
     @Override
     public void onInitialize() {
@@ -99,6 +108,20 @@ public class Slimestone implements ModInitializer {
                             })
                     )
 
+                    .then(Commands.literal("text1")
+                            .executes(context -> {
+                                ServerPlayer player = context.getSource().getPlayerOrException();
+                                BlockPos target = getTargetBlock(player);
+                                if (target == null) {
+                                    context.getSource().sendFailure(Component.literal(
+                                            "You must be looking at a block!"));
+                                    return 0;
+                                }
+                                spawnNumberDisplay(player, target);
+                                return 1;
+                            })
+                    )
+
                     .then(Commands.literal("compare")
                             .executes(context -> {
                                 ServerPlayer player = context.getSource().getPlayerOrException();
@@ -141,6 +164,70 @@ public class Slimestone implements ModInitializer {
                                 MovingBlockDebugger.fullReset(player);
                                 return 1;
                             })
+                    )
+            );
+
+            // /poi <gt> [window] -> re-summon only the actions from the last
+            // simulation that happened within <window> GT of <gt>. If window
+            // is omitted, reuses whatever window was last used (default 3).
+            // /poi with no arguments at all resets back to the full end-of-run
+            // display (every piston/observer that had an action), same as
+            // what /slimestone always used to show before windowed POIs existed.
+            dispatcher.register(Commands.literal("poi")
+                    .executes(context -> {
+                        ServerPlayer player = context.getSource().getPlayerOrException();
+
+                        if (lastSimLevel == null) {
+                            context.getSource().sendFailure(Component.literal(
+                                    "§c[Slimestone] No simulation has been run yet."));
+                            return 0;
+                        }
+
+                        int shown = lastSimLevel.spawnFullDisplay();
+
+                        player.sendSystemMessage(Component.literal(
+                                "§a[Slimestone] Showing full run - §f" + shown + "§a display(s)."));
+                        return 1;
+                    })
+                    .then(Commands.argument("gt", IntegerArgumentType.integer())
+                            .executes(context -> {
+                                ServerPlayer player = context.getSource().getPlayerOrException();
+
+                                if (lastSimLevel == null) {
+                                    context.getSource().sendFailure(Component.literal(
+                                            "§c[Slimestone] No simulation has been run yet."));
+                                    return 0;
+                                }
+
+                                int gt = IntegerArgumentType.getInteger(context, "gt");
+                                int shown = lastSimLevel.spawnPointOfInterest(gt, lastPoiWindow);
+
+                                player.sendSystemMessage(Component.literal(
+                                        "§a[Slimestone] Showing §f" + shown
+                                                + "§a display(s) within §f" + lastPoiWindow + "§a GT of §fGT " + gt));
+                                return 1;
+                            })
+                            .then(Commands.argument("window", IntegerArgumentType.integer())
+                                    .executes(context -> {
+                                        ServerPlayer player = context.getSource().getPlayerOrException();
+
+                                        if (lastSimLevel == null) {
+                                            context.getSource().sendFailure(Component.literal(
+                                                    "§c[Slimestone] No simulation has been run yet."));
+                                            return 0;
+                                        }
+
+                                        int gt = IntegerArgumentType.getInteger(context, "gt");
+                                        int window = IntegerArgumentType.getInteger(context, "window");
+                                        lastPoiWindow = window;
+                                        int shown = lastSimLevel.spawnPointOfInterest(gt, window);
+
+                                        player.sendSystemMessage(Component.literal(
+                                                "§a[Slimestone] Showing §f" + shown
+                                                        + "§a display(s) within §f" + window + "§a GT of §fGT " + gt));
+                                        return 1;
+                                    })
+                            )
                     )
             );
         });
@@ -277,6 +364,7 @@ public class Slimestone implements ModInitializer {
         MovingBlockDebugger.resetExpected();
 
         VirtualLevel level = new VirtualLevel(player);
+        lastSimLevel = level;
 
         for (BlockPos p : computeContraptionRegion(player.level(), targetPos)) {
             level.setBlockRaw(p, player.level().getBlockState(p));

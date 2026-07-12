@@ -54,21 +54,40 @@ public class VirtualLevel {
 
     // Observers only ever log their first TWO actions total (in whatever order
     // they actually occur - normally an ON pulse-start followed by an OFF
-    // pulse-end, one per cycle).
+    // pulse-end, one per cycle). This cap is only for the *normal* end-of-run
+    // display - see pendingObserverPoiDisplays below for the uncapped POI feed.
     private final Map<BlockPos, Integer> observerActionCount = new HashMap<>();
     private final List<ObserverPendingEvent> pendingObserverDisplays = new ArrayList<>();
     // Accumulates each observer's actions across the whole run; only spawned as
     // a real text_display once the simulation finishes (see spawnObserverDisplays).
     private final Map<BlockPos, ObserverDisplayEntry> observerDisplayEntries = new LinkedHashMap<>();
 
+    // Mirrors pendingObserverDisplays/observerDisplayEntries above, but with no
+    // two-action cap - every observer action gets recorded here so that
+    // /slimestone poi can show as many actions as actually happened in its
+    // window, not just an observer's first two. Kept fully separate from the
+    // capped pipeline so it can never change the normal display's suffixing.
+    private final List<ObserverPendingEvent> pendingObserverPoiDisplays = new ArrayList<>();
+    private final Map<BlockPos, ObserverDisplayEntry> observerPoiDisplayEntries = new LinkedHashMap<>();
+
     // Pistons only ever log their first TWO actions total (in whatever order
     // they actually occur - usually one Extend and one Retract, but a piston
     // that starts already extended could see a Retract before an Extend).
+    // This cap is only for the *normal* end-of-run display - see
+    // pendingPistonPoiDisplays below for the uncapped POI feed.
     private final Map<BlockPos, Integer> pistonActionCount = new HashMap<>();
     private final List<PistonPendingEvent> pendingPistonDisplays = new ArrayList<>();
     // Accumulates each piston's actions across the whole run; only spawned as a
     // real text_display once the simulation finishes (see spawnPistonDisplays).
     private final Map<BlockPos, PistonDisplayEntry> pistonDisplayEntries = new LinkedHashMap<>();
+
+    // Mirrors pendingPistonDisplays/pistonDisplayEntries above, but with no
+    // two-action cap - every piston action gets recorded here so that
+    // /slimestone poi can show as many actions as actually happened in its
+    // window, not just a piston's first two. Kept fully separate from the
+    // capped pipeline so it can never change the normal display's suffixing.
+    private final List<PistonPendingEvent> pendingPistonPoiDisplays = new ArrayList<>();
+    private final Map<BlockPos, PistonDisplayEntry> pistonPoiDisplayEntries = new LinkedHashMap<>();
 
     private static class ObserverPendingEvent {
         final BlockPos pos;
@@ -158,18 +177,43 @@ public class VirtualLevel {
         this.player = player;
         this.pistonMechanics = new PistonMechanics(this);
     }
+    // Converts a 0-based action index into an Excel-style column label: a, b,
+    // ..., z, aa, ab, ..., az, ba, ... instead of the raw (char) ('a' + i)
+    // cast, which would run off the end of the alphabet into '{', '|', etc.
+    // once a block racks up more than 26 actions in a single tick.
+    private static String excelSuffix(int index) {
+        StringBuilder sb = new StringBuilder();
+        int n = index + 1; // work in 1-based terms so the math lines up
+        while (n > 0) {
+            int rem = (n - 1) % 26;
+            sb.insert(0, (char) ('a' + rem));
+            n = (n - 1) / 26;
+        }
+        return sb.toString();
+    }
+
     public void queueObserverDisplay(BlockPos pos, boolean poweredOn) {
         BlockPos displayPos = getOriginPos(pos).immutable();
+
+        // POI: every action is recorded here, uncapped.
+        pendingObserverPoiDisplays.add(new ObserverPendingEvent(displayPos, poweredOn));
+
+        // Normal display: only the first two actions for this observer are ever logged.
         int count = observerActionCount.getOrDefault(displayPos, 0);
-        if (count >= 2) return; // only the first two actions for this observer are ever logged
+        if (count >= 2) return;
         observerActionCount.put(displayPos, count + 1);
         pendingObserverDisplays.add(new ObserverPendingEvent(displayPos, poweredOn));
     }
 
     public void queuePistonDisplay(BlockPos pos, int blockCount, boolean extending) {
         BlockPos displayPos = getOriginPos(pos).immutable();
+
+        // POI: every action is recorded here, uncapped.
+        pendingPistonPoiDisplays.add(new PistonPendingEvent(displayPos, extending, blockCount));
+
+        // Normal display: only the first two actions for this piston are ever logged.
         int count = pistonActionCount.getOrDefault(displayPos, 0);
-        if (count >= 2) return; // only the first two actions for this piston are ever logged
+        if (count >= 2) return;
         pistonActionCount.put(displayPos, count + 1);
         pendingPistonDisplays.add(new PistonPendingEvent(displayPos, extending, blockCount));
     }
@@ -182,13 +226,50 @@ public class VirtualLevel {
 
         for (int i = 0; i < pendingObserverDisplays.size(); i++) {
             ObserverPendingEvent e = pendingObserverDisplays.get(i);
-            String suffix = useSuffix ? String.valueOf((char) ('a' + i)) : "";
+            String suffix = useSuffix ? excelSuffix(i) : "";
 
             ObserverDisplayEntry entry = observerDisplayEntries.computeIfAbsent(e.pos, p -> new ObserverDisplayEntry());
             entry.actions.add(new ObserverActionRecord(tick, suffix, e.poweredOn));
         }
         pendingObserverDisplays.clear();
     }
+
+    // POI counterpart of flushObserverDisplays - same per-tick suffixing
+    // logic, but reading/writing the uncapped POI-only lists so it can never
+    // affect the normal display.
+    private void flushObserverPoiDisplays(int tick) {
+        if (pendingObserverPoiDisplays.isEmpty()) return;
+        boolean useSuffix = pendingObserverPoiDisplays.size() > 1;
+
+        for (int i = 0; i < pendingObserverPoiDisplays.size(); i++) {
+            ObserverPendingEvent e = pendingObserverPoiDisplays.get(i);
+            String suffix = useSuffix ? excelSuffix(i) : "";
+
+            ObserverDisplayEntry entry = observerPoiDisplayEntries.computeIfAbsent(e.pos, p -> new ObserverDisplayEntry());
+            entry.actions.add(new ObserverActionRecord(tick, suffix, e.poweredOn));
+        }
+        pendingObserverPoiDisplays.clear();
+    }
+
+    // One matchable action, kept around after the simulation finishes so a
+    // later /poi <gt> [window] command can re-summon just the actions that
+    // happened near a specific tick. Stored as raw data rather than a
+    // pre-colored string because the color/suffix pieces are only combined
+    // once we know exactly which actions land in the queried window - see
+    // spawnPointOfInterest for where that's rendered (using the actual
+    // simulation GT, not one relative to centerGt).
+    private record PoiEntry(BlockPos pos, int tick, String suffix, boolean isPiston, boolean stateOn, int blockCount) {}
+
+    // Every action from the most recent simulation run, in chronological order.
+    private final List<PoiEntry> poiEntries = new ArrayList<>();
+
+    // Snapshot of the text every text_display showed right after the
+    // simulation finished - the "full picture" of every piston/observer that
+    // had an action, capped at its usual first-two-actions-per-block limit.
+    // Never cleared once written, so a bare "/poi" (no gt) can restore this
+    // view later after a windowed "/poi <gt> [window]" has replaced it with
+    // a filtered one - see spawnFullDisplay.
+    private final Map<BlockPos, String> fullDisplayText = new LinkedHashMap<>();
 
     // Spawns the actual text_display entities once the whole simulation is
     // done. Up to two actions land on one row, colored by type (§b light
@@ -203,10 +284,13 @@ public class VirtualLevel {
             for (int i = 0; i < actions.size(); i++) {
                 ObserverActionRecord a = actions.get(i);
                 String color = a.poweredOn ? "§b" : "§d";
+                String piece = color + a.tick + a.suffix;
                 if (i > 0) line.append(" ");
-                line.append(color).append(a.tick).append(a.suffix);
+                line.append(piece);
             }
-            spawnGtDisplay(mapEntry.getKey(), line.toString());
+            String text = line.toString();
+            fullDisplayText.put(mapEntry.getKey(), text);
+            spawnGtDisplay(mapEntry.getKey(), text);
         }
         observerDisplayEntries.clear();
     }
@@ -220,12 +304,29 @@ public class VirtualLevel {
 
         for (int i = 0; i < pendingPistonDisplays.size(); i++) {
             PistonPendingEvent e = pendingPistonDisplays.get(i);
-            String suffix = useSuffix ? String.valueOf((char) ('a' + i)) : "";
+            String suffix = useSuffix ? excelSuffix(i) : "";
 
             PistonDisplayEntry entry = pistonDisplayEntries.computeIfAbsent(e.pos, p -> new PistonDisplayEntry());
             entry.actions.add(new PistonActionRecord(tick, suffix, e.extending, e.blockCount));
         }
         pendingPistonDisplays.clear();
+    }
+
+    // POI counterpart of flushPistonDisplays - same per-tick suffixing logic,
+    // but reading/writing the uncapped POI-only lists so it can never affect
+    // the normal display.
+    private void flushPistonPoiDisplays(int tick) {
+        if (pendingPistonPoiDisplays.isEmpty()) return;
+        boolean useSuffix = pendingPistonPoiDisplays.size() > 1;
+
+        for (int i = 0; i < pendingPistonPoiDisplays.size(); i++) {
+            PistonPendingEvent e = pendingPistonPoiDisplays.get(i);
+            String suffix = useSuffix ? excelSuffix(i) : "";
+
+            PistonDisplayEntry entry = pistonPoiDisplayEntries.computeIfAbsent(e.pos, p -> new PistonDisplayEntry());
+            entry.actions.add(new PistonActionRecord(tick, suffix, e.extending, e.blockCount));
+        }
+        pendingPistonPoiDisplays.clear();
     }
 
     // Spawns the actual text_display entities once the whole simulation is
@@ -237,25 +338,139 @@ public class VirtualLevel {
             List<PistonActionRecord> actions = mapEntry.getValue().actions;
             if (actions.isEmpty()) continue;
 
+            String[] topPieces = new String[actions.size()];
+            String[] bottomPieces = new String[actions.size()];
+
             StringBuilder firstLine = new StringBuilder();
             for (int i = 0; i < actions.size(); i++) {
                 PistonActionRecord a = actions.get(i);
                 String color = actions.size() == 1 ? "§6" : (a.extending ? "§e" : "§a");
+                topPieces[i] = color + a.tick + a.suffix;
                 if (i > 0) firstLine.append(" ");
-                firstLine.append(color).append(a.tick).append(a.suffix);
+                firstLine.append(topPieces[i]);
             }
 
             StringBuilder secondLine = new StringBuilder();
-            for (PistonActionRecord a : actions) {
+            for (int i = 0; i < actions.size(); i++) {
+                PistonActionRecord a = actions.get(i);
                 if (a.blockCount == NO_COUNT) continue; // nothing meaningful to show for this action
                 String countColor = a.blockCount > 12 ? "§c" : (a.extending ? "§e" : "§a");
+                bottomPieces[i] = countColor + a.blockCount;
                 if (secondLine.length() > 0) secondLine.append(" ");
-                secondLine.append(countColor).append(a.blockCount);
+                secondLine.append(bottomPieces[i]);
             }
+
             String text = firstLine + "\n" + secondLine;
+            fullDisplayText.put(mapEntry.getKey(), text);
             spawnGtDisplay(mapEntry.getKey(), text);
         }
         pistonDisplayEntries.clear();
+    }
+
+    // Builds poiEntries for the whole run from the uncapped POI-only feed
+    // (observerPoiDisplayEntries / pistonPoiDisplayEntries), completely
+    // independent of the normal display's first-two-actions cap and of the
+    // piston single-action orange recolor - POI always shows every action
+    // recorded, each with its true ON/OFF or extend/retract color. The
+    // actual GT number shown is computed later, relative to the queried
+    // centerGt - see spawnPointOfInterest.
+    private void buildPoiEntries() {
+        for (Map.Entry<BlockPos, ObserverDisplayEntry> mapEntry : observerPoiDisplayEntries.entrySet()) {
+            for (ObserverActionRecord a : mapEntry.getValue().actions) {
+                poiEntries.add(new PoiEntry(mapEntry.getKey(), a.tick, a.suffix, false, a.poweredOn, NO_COUNT));
+            }
+        }
+        observerPoiDisplayEntries.clear();
+
+        for (Map.Entry<BlockPos, PistonDisplayEntry> mapEntry : pistonPoiDisplayEntries.entrySet()) {
+            for (PistonActionRecord a : mapEntry.getValue().actions) {
+                poiEntries.add(new PoiEntry(mapEntry.getKey(), a.tick, a.suffix, true, a.extending, a.blockCount));
+            }
+        }
+        pistonPoiDisplayEntries.clear();
+    }
+
+    /**
+     * Re-summons only the actions from the most recent simulation run that
+     * happened within {@code window} game-ticks of {@code centerGt}
+     * (inclusive on both ends), replacing whatever text displays currently
+     * exist. Multiple matching actions at the same block still land on one
+     * display, same as a normal run. Unlike the normal end-of-run display,
+     * this is not limited to an observer/piston's first two actions - every
+     * action recorded for a block that falls inside the window is shown.
+     * <p>
+     * The GT shown on each display is the actual simulation tick the action
+     * happened on - {@code centerGt} is only used to pick which actions fall
+     * inside the window, it is no longer subtracted out.
+     *
+     * @return the number of displays spawned
+     */
+    public int spawnPointOfInterest(int centerGt, int window) {
+        Map<BlockPos, List<PoiEntry>> byPos = new LinkedHashMap<>();
+        for (PoiEntry e : poiEntries) {
+            if (Math.abs(e.tick() - centerGt) > window) continue;
+            byPos.computeIfAbsent(e.pos(), p -> new ArrayList<>()).add(e);
+        }
+
+        killAllTextDisplays();
+
+        for (Map.Entry<BlockPos, List<PoiEntry>> group : byPos.entrySet()) {
+            StringBuilder top = new StringBuilder();
+            StringBuilder bottom = new StringBuilder();
+            for (PoiEntry e : group.getValue()) {
+                int gt = e.tick(); // actual simulation GT, not relative to centerGt
+
+                String topPiece;
+                String bottomPiece = null;
+                if (e.isPiston()) {
+                    String color = e.stateOn() ? "§e" : "§a"; // extend / retract
+                    topPiece = color + gt + e.suffix();
+                    if (e.blockCount() != NO_COUNT) {
+                        String countColor = e.blockCount() > 12 ? "§c" : (e.stateOn() ? "§e" : "§a");
+                        bottomPiece = countColor + e.blockCount();
+                    }
+                } else {
+                    String color = e.stateOn() ? "§b" : "§d"; // ON / OFF
+                    topPiece = color + gt + e.suffix();
+                }
+
+                if (top.length() > 0) top.append(" ");
+                top.append(topPiece);
+                if (bottomPiece != null) {
+                    if (bottom.length() > 0) bottom.append(" ");
+                    bottom.append(bottomPiece);
+                }
+            }
+            String text = bottom.length() > 0 ? top + "\n" + bottom : top.toString();
+            spawnGtDisplay(group.getKey(), text);
+        }
+
+        return byPos.size();
+    }
+
+    /**
+     * Restores the full end-of-run display - every piston/observer that had
+     * an action during the simulation, exactly as it looked right after
+     * {@code /slimestone} finished running - replacing whatever text
+     * displays currently exist. This is what a bare {@code /poi} (no gt)
+     * resets back to after a windowed {@code /poi <gt> [window]} has
+     * replaced it with a filtered view.
+     *
+     * @return the number of displays spawned
+     */
+    public int spawnFullDisplay() {
+        killAllTextDisplays();
+        for (Map.Entry<BlockPos, String> entry : fullDisplayText.entrySet()) {
+            spawnGtDisplay(entry.getKey(), entry.getValue());
+        }
+        return fullDisplayText.size();
+    }
+
+    private void killAllTextDisplays() {
+        player.getServer().getCommands().performPrefixedCommand(
+                player.createCommandSourceStack().withSuppressedOutput(),
+                "kill @e[type=minecraft:text_display]"
+        );
     }
 
     private void spawnGtDisplay(BlockPos targetPos, String jsonText) {
@@ -396,6 +611,7 @@ public class VirtualLevel {
 
             // FLUSH OBSERVER LABELS HERE
             flushObserverDisplays(currentTick);
+            flushObserverPoiDisplays(currentTick);
 
             // ── PHASE 2: BLOCK EVENTS ─────────────────────────────────────────
             currentPhase = "BLOCK EVENTS";
@@ -409,6 +625,7 @@ public class VirtualLevel {
 
             // FLUSH PISTON LABELS HERE
             flushPistonDisplays(currentTick);
+            flushPistonPoiDisplays(currentTick);
 
             // ── PHASE 3: BLOCK ENTITIES ────────────────────────────────────────
             currentPhase = "BLOCK ENTITIES";
@@ -431,6 +648,8 @@ public class VirtualLevel {
         spawnPistonDisplays();
         // ...and each observer's merged ON/OFF row.
         spawnObserverDisplays();
+        // ...and build the uncapped POI action list from the parallel feed.
+        buildPoiEntries();
     }
     public int getCurrentTick() {
         return currentTick;
