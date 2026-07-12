@@ -90,9 +90,23 @@ public class PistonMechanics {
         // Condition 2 – the turn-off tick must still be pending, confirming the
         // observer is in its live pulse window (powered on, but not yet ticked off).
         // Mirrors affectNeighborsAfterRemoval's hasScheduledTick gate.
-        // Note: toDestroy blocks never need this path — observers are movable, so
-        // the resolver always puts them in toPush, never toDestroy. We only call
-        // this for pushed blocks (toPush loop below), matching vanilla's behaviour.
+        //
+        // Vanilla's affectNeighborsAfterRemoval itself is only ever called from
+        // the toDestroy loop in moveBlocks — never for toPush — so we keep this
+        // call sited there too, for a genuinely destroyed observer. But an
+        // Observer's push reaction is never DESTROY, so it can never land in
+        // toDestroy: that call alone can never fire for a real observer.
+        //
+        // What actually turns off a piston reading power through a solid block
+        // when a mid-pulse observer gets shoved out of the way in real vanilla is
+        // a *different, generic* mechanism - the indirect-neighbour-shape pass
+        // that Level#setBlock runs for every block replacement, independent of
+        // which block it is. Our moving-piston placements use setBlockRaw and
+        // skip that pass entirely, so we call this helper directly at each site
+        // that clobbers a tile in-place (the toPush overwrite loop, the
+        // extending head placement, and the trailing leftover/vacated spots) to
+        // stand in for it, scoped to the one block type we actually model this
+        // for.
         if (!level.hasScheduledTick(pos, Blocks.OBSERVER)) return;
 
         BlockPos outputPos = pos.relative(oldState.getValue(BlockStateProperties.FACING).getOpposite());
@@ -337,14 +351,17 @@ public class PistonMechanics {
 
         for (int i = toDestroy.size() - 1; i >= 0; i--) {
             BlockPos p = toDestroy.get(i);
+            BlockState destroyedState = level.getBlockState(p);
             level.setBlock(p, Blocks.AIR.defaultBlockState());
+            // Mirrors vanilla's state.affectNeighborsAfterRemoval(serverLevel, pos, false)
+            // call in this same loop — scoped to genuinely destroyed blocks only.
+            fireObserverRemovalUpdate(p, destroyedState);
         }
 
         Map<BlockPos, BlockState> vacatedSpots = new HashMap<>();
         for (BlockPos p : toPush) {
             vacatedSpots.put(p, level.getBlockState(p));
         }
-        Map<BlockPos, BlockState> oldPushStates = new HashMap<>(vacatedSpots);
 
         Direction moveDir = extending ? dir : dir.getOpposite();
         BlockPos headPos = pistonPos.relative(dir);
@@ -362,6 +379,17 @@ public class PistonMechanics {
 
             vacatedSpots.remove(newPos);
 
+            // Whatever currently sits at newPos is about to be silently clobbered
+            // by setBlockRaw below. In vanilla this transition still goes through
+            // Level#setBlock, whose generic indirect-neighbour-shape pass is what
+            // actually turns off a piston reading power through a solid block next
+            // to a mid-pulse observer that just got shoved out of the way - it has
+            // nothing to do with affectNeighborsAfterRemoval/toDestroy. Since our
+            // setBlockRaw bypasses that pass entirely, capture the prior state here
+            // and fire the same observer-removal notification toDestroy already
+            // gets, so this in-chain overwrite doesn't go unnoticed.
+            BlockState overwrittenState = level.getBlockState(newPos);
+
             PistonType type = pistonState.is(Blocks.STICKY_PISTON) ? PistonType.STICKY : PistonType.DEFAULT;
             SimPistonMovingEntity be = new SimPistonMovingEntity(newPos, movingState, dir, extending, false);
             level.blockEntities.put(newPos, be);
@@ -370,6 +398,7 @@ public class PistonMechanics {
             level.setBlockRaw(newPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
             //log("Created MovingPiston BE at " + newPos.toShortString() + " carrying " + movingState.getBlock().getName().getString());
             level.fireShapeUpdates(newPos);
+            fireObserverRemovalUpdate(newPos, overwrittenState);
         }
 
         if (extending) {
@@ -379,25 +408,29 @@ public class PistonMechanics {
                     .setValue(PistonHeadBlock.TYPE, type);
 
             vacatedSpots.remove(headPos);
+            // Same reasoning as the toPush loop above: if the observer being
+            // pushed is the block directly in front of the piston (distance 1),
+            // it's headPos - not the toPush loop - that clobbers it.
+            BlockState overwrittenAtHead = level.getBlockState(headPos);
             SimPistonMovingEntity headBE = new SimPistonMovingEntity(headPos, headState, dir, true, true);
             level.blockEntities.put(headPos, headBE);
             level.setBlockRaw(headPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
             //log("Created MovingPiston BE at " + headPos.toShortString() + " carrying PISTON_HEAD");
             MovingBlockDebugger.logExpected(headPos, headState, true, level.getCurrentTick());
             level.fireShapeUpdates(headPos);
+            fireObserverRemovalUpdate(headPos, overwrittenAtHead);
         }
 
-        for (BlockPos p : vacatedSpots.keySet()) {
+        for (Map.Entry<BlockPos, BlockState> entry : vacatedSpots.entrySet()) {
+            BlockPos p = entry.getKey();
             level.setBlockRaw(p, Blocks.AIR.defaultBlockState());
             level.fireShapeUpdates(p);
+            fireObserverRemovalUpdate(p, entry.getValue());
         }
 
         for (int i = toPush.size() - 1; i >= 0; i--) {
             //log("Firing neighbor updates for vacated pushed pos: " + toPush.get(i).toShortString());
             level.updateNeighborsAt(toPush.get(i));
-        }
-        for (int i = toPush.size() - 1; i >= 0; i--) {
-            fireObserverRemovalUpdate(toPush.get(i), oldPushStates.get(toPush.get(i)));
         }
         if (extending) {
             //log("Firing neighbor updates for moving piston head starting pos: " + headPos.toShortString());

@@ -164,8 +164,8 @@ public class Slimestone implements ModInitializer {
         trackedOrigin = origin.immutable();
         trackingEnabled = true;
 
-        //player.sendSystemMessage(Component.literal(
-        //        "§a[Slimestone] Tracking enabled at " + trackedOrigin.toShortString()));
+        player.sendSystemMessage(Component.literal(
+                "§a[Slimestone] Tracking enabled at " + trackedOrigin.toShortString()));
 
         runSimulation(player, trackedOrigin);
     }
@@ -176,7 +176,7 @@ public class Slimestone implements ModInitializer {
         trackedPlayer = null;
         pendingSimRun = false;
 
-        //player.sendSystemMessage(Component.literal("§e[Slimestone] Tracking disabled."));
+        player.sendSystemMessage(Component.literal("§e[Slimestone] Tracking disabled."));
     }
 
     /**
