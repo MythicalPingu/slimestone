@@ -795,16 +795,19 @@ public class VirtualLevel {
                     }
                 }
             } else if (state.is(Blocks.NOTE_BLOCK)) {
-
                 if (dir.getAxis() == Direction.Axis.Y) {
                     BlockState updated = simSetNoteBlockInstrument(neighborPos, state);
                     if (updated != state) {
-                        setBlockRaw(neighborPos, updated);
+
+                        // Replaced setBlockRaw with setBlock + UPDATE_CLIENTS
+                        // This ensures bit 16 (UPDATE_KNOWN_SHAPE) is NOT set,
+                        // forcing fireShapeUpdates() to run and notify observers.
+                        setBlock(neighborPos, updated, UPDATE_CLIENTS);
+
                         //log("§a[NoteBlock] Instrument updated at " + neighborPos.toShortString()
                         //        + " → " + updated.getValue(BlockStateProperties.NOTEBLOCK_INSTRUMENT).name());
                     }
                 }
-                // Non-Y directions fall through super.updateShape, which is a no-op for NoteBlock.
             }
         }
 
