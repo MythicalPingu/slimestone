@@ -12,6 +12,8 @@ import net.minecraft.world.level.block.piston.PistonHeadBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.NoteBlockInstrument;
+import net.minecraft.world.level.block.*;
+import net.minecraft.world.level.block.state.properties.SlabType;
 
 import java.util.*;
 
@@ -853,6 +855,92 @@ public class VirtualLevel {
         if (state.is(Blocks.PISTON_HEAD) || state.is(Blocks.MOVING_PISTON)) return false;
         if (state.is(Blocks.HONEY_BLOCK)) return false; // Slime blocks are solid blocks unlike honey
         if (state.getBlock() instanceof TrapDoorBlock) return false; // Trapdoors are not solid
+
+        // Rails (regular, powered, activator, detector) share BaseRailBlock
+        if (state.getBlock() instanceof BaseRailBlock) return false;
+
+        // Anvil (all 3 damage states)
+        if (state.getBlock() instanceof AnvilBlock) return false;
+
+        // Carpets (wool carpets)
+        if (state.getBlock() instanceof CarpetBlock) return false;
+
+        // Cauldron (empty, water, lava, powder snow)
+        if (state.getBlock() instanceof AbstractCauldronBlock) return false;
+
+        if (state.is(Blocks.CHAIN)) return false;
+        if (state.is(Blocks.COMPOSTER)) return false;
+
+        // Copper Bulb (all oxidation/wax states)
+        if (state.is(Blocks.COPPER_BULB)
+                || state.is(Blocks.EXPOSED_COPPER_BULB)
+                || state.is(Blocks.WEATHERED_COPPER_BULB)
+                || state.is(Blocks.OXIDIZED_COPPER_BULB)
+                || state.is(Blocks.WAXED_COPPER_BULB)
+                || state.is(Blocks.WAXED_EXPOSED_COPPER_BULB)
+                || state.is(Blocks.WAXED_WEATHERED_COPPER_BULB)
+                || state.is(Blocks.WAXED_OXIDIZED_COPPER_BULB)) return false;
+
+        // Copper Grate (all oxidation/wax states)
+        if (state.is(Blocks.COPPER_GRATE)
+                || state.is(Blocks.EXPOSED_COPPER_GRATE)
+                || state.is(Blocks.WEATHERED_COPPER_GRATE)
+                || state.is(Blocks.OXIDIZED_COPPER_GRATE)
+                || state.is(Blocks.WAXED_COPPER_GRATE)
+                || state.is(Blocks.WAXED_EXPOSED_COPPER_GRATE)
+                || state.is(Blocks.WAXED_WEATHERED_COPPER_GRATE)
+                || state.is(Blocks.WAXED_OXIDIZED_COPPER_GRATE)) return false;
+
+        // Coral fans + floor corals (not the solid Coral Block)
+        if (state.getBlock() instanceof BaseCoralPlantTypeBlock) return false;
+
+        // Dirt Path, Farmland
+        if (state.getBlock() instanceof DirtPathBlock) return false;
+        if (state.getBlock() instanceof FarmBlock) return false;
+
+        if (state.is(Blocks.DRAGON_EGG)) return false;
+        if (state.is(Blocks.END_ROD)) return false;
+
+        // Fences, Fence Gates
+        if (state.getBlock() instanceof FenceBlock) return false;
+        if (state.getBlock() instanceof FenceGateBlock) return false;
+
+        // Ice + Frosted Ice (FrostedIceBlock extends IceBlock)
+        if (state.getBlock() instanceof IceBlock) return false;
+
+        // Glass, stained glass, glass pane, stained glass panes
+        if (state.is(Blocks.GLASS)) return false;
+        if (state.is(Blocks.GLASS_PANE)) return false;
+        if (state.getBlock() instanceof StainedGlassBlock) return false;
+        if (state.getBlock() instanceof StainedGlassPaneBlock) return false;
+
+        if (state.is(Blocks.GLOWSTONE)) return false;
+        if (state.is(Blocks.HEAVY_CORE)) return false;
+
+        // Iron Bars
+        if (state.getBlock() instanceof IronBarsBlock) return false;
+
+        if (state.is(Blocks.LIGHTNING_ROD)) return false;
+        if (state.is(Blocks.POINTED_DRIPSTONE)) return false;
+        if (state.is(Blocks.POWDER_SNOW)) return false;
+        if (state.is(Blocks.SCAFFOLDING)) return false;
+        if (state.is(Blocks.SEA_LANTERN)) return false;
+
+        // Single slabs only (double slabs remain conductive)
+        if (state.getBlock() instanceof SlabBlock
+                && state.getValue(SlabBlock.TYPE) != SlabType.DOUBLE) return false;
+
+        // All stairs (official Mojang name is StairBlock, not StairsBlock)
+        if (state.getBlock() instanceof StairBlock) return false;
+
+        if (state.is(Blocks.SNIFFER_EGG)) return false;
+        if (state.is(Blocks.STONECUTTER)) return false;
+        if (state.is(Blocks.TINTED_GLASS)) return false;
+        if (state.is(Blocks.TNT)) return false;
+
+        // All walls
+        if (state.getBlock() instanceof WallBlock) return false;
+
         return true;
     }
 

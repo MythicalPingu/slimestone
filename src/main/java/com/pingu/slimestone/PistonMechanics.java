@@ -91,22 +91,23 @@ public class PistonMechanics {
         // observer is in its live pulse window (powered on, but not yet ticked off).
         // Mirrors affectNeighborsAfterRemoval's hasScheduledTick gate.
         //
-        // Vanilla's affectNeighborsAfterRemoval itself is only ever called from
-        // the toDestroy loop in moveBlocks — never for toPush — so we keep this
-        // call sited there too, for a genuinely destroyed observer. But an
-        // Observer's push reaction is never DESTROY, so it can never land in
-        // toDestroy: that call alone can never fire for a real observer.
-        //
-        // What actually turns off a piston reading power through a solid block
-        // when a mid-pulse observer gets shoved out of the way in real vanilla is
-        // a *different, generic* mechanism - the indirect-neighbour-shape pass
-        // that Level#setBlock runs for every block replacement, independent of
-        // which block it is. Our moving-piston placements use setBlockRaw and
-        // skip that pass entirely, so we call this helper directly at each site
-        // that clobbers a tile in-place (the toPush overwrite loop, the
-        // extending head placement, and the trailing leftover/vacated spots) to
-        // stand in for it, scoped to the one block type we actually model this
-        // for.
+        // This helper is only ever wired up for positions whose contents are
+        // gone in this exact instant - either genuinely destroyed (the
+        // toDestroy loop) or instantaneously overwritten in place by another
+        // real block within this same moveBlocks call (the piston head
+        // landing on headPos). It must NOT be called for the ordinary
+        // vacatedSpots-to-air positions further down a toPush chain: those
+        // are simple relocations, and the vacated position is still,
+        // geometrically, a neighbor of where the block lands one step over -
+        // calling this for a merely-relocated observer risks the piston's own
+        // move routing an update back into the very observer it's mid-move
+        // on, a same-tick self update that would spuriously unpower it (GT0)
+        // in a way vanilla never does. Vanilla's real handling for those
+        // vacated spots is purely generic and observer-agnostic: a direct
+        // shape-update pass (mirrored by fireShapeUpdates) plus a plain
+        // updateNeighborsAt on each vacated position - both already fired
+        // independently by the caller, with no observer-specific
+        // "affectNeighborsAfterRemoval" in the mix.
         if (!level.hasScheduledTick(pos, Blocks.OBSERVER)) return;
 
         BlockPos outputPos = pos.relative(oldState.getValue(BlockStateProperties.FACING).getOpposite());
@@ -379,17 +380,14 @@ public class PistonMechanics {
 
             vacatedSpots.remove(newPos);
 
-            // Whatever currently sits at newPos is about to be silently clobbered
-            // by setBlockRaw below. In vanilla this transition still goes through
-            // Level#setBlock, whose generic indirect-neighbour-shape pass is what
-            // actually turns off a piston reading power through a solid block next
-            // to a mid-pulse observer that just got shoved out of the way - it has
-            // nothing to do with affectNeighborsAfterRemoval/toDestroy. Since our
-            // setBlockRaw bypasses that pass entirely, capture the prior state here
-            // and fire the same observer-removal notification toDestroy already
-            // gets, so this in-chain overwrite doesn't go unnoticed.
-            BlockState overwrittenState = level.getBlockState(newPos);
-
+            // Whatever currently sits at newPos is about to be silently
+            // clobbered by setBlockRaw below - but unlike a genuine
+            // destruction, this is just a relocation, so no
+            // affectNeighborsAfterRemoval-style notification belongs here
+            // (see fireObserverRemovalUpdate's doc comment). fireShapeUpdates
+            // below plus the trailing updateNeighborsAt pass over the vacated
+            // toPush positions already cover what vanilla actually does for
+            // this case.
             PistonType type = pistonState.is(Blocks.STICKY_PISTON) ? PistonType.STICKY : PistonType.DEFAULT;
             SimPistonMovingEntity be = new SimPistonMovingEntity(newPos, movingState, dir, extending, false);
             level.blockEntities.put(newPos, be);
@@ -398,7 +396,6 @@ public class PistonMechanics {
             level.setBlockRaw(newPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
             //log("Created MovingPiston BE at " + newPos.toShortString() + " carrying " + movingState.getBlock().getName().getString());
             level.fireShapeUpdates(newPos);
-            fireObserverRemovalUpdate(newPos, overwrittenState);
         }
 
         if (extending) {
@@ -407,25 +404,34 @@ public class PistonMechanics {
                     .setValue(PistonHeadBlock.FACING, dir)
                     .setValue(PistonHeadBlock.TYPE, type);
 
+            // If the observer being pushed is the block directly in front of
+            // the piston (distance 1), it's headPos - not the toPush loop -
+            // that clobbers it. Grab what was actually sitting here before
+            // vacatedSpots forgets about it and the head placeholder overwrites
+            // it below.
+            BlockState headOriginalState = vacatedSpots.get(headPos);
             vacatedSpots.remove(headPos);
-            // Same reasoning as the toPush loop above: if the observer being
-            // pushed is the block directly in front of the piston (distance 1),
-            // it's headPos - not the toPush loop - that clobbers it.
-            BlockState overwrittenAtHead = level.getBlockState(headPos);
+
             SimPistonMovingEntity headBE = new SimPistonMovingEntity(headPos, headState, dir, true, true);
             level.blockEntities.put(headPos, headBE);
             level.setBlockRaw(headPos, Blocks.MOVING_PISTON.defaultBlockState().setValue(BlockStateProperties.FACING, dir).setValue(PistonHeadBlock.TYPE, type));
             //log("Created MovingPiston BE at " + headPos.toShortString() + " carrying PISTON_HEAD");
             MovingBlockDebugger.logExpected(headPos, headState, true, level.getCurrentTick());
             level.fireShapeUpdates(headPos);
-            fireObserverRemovalUpdate(headPos, overwrittenAtHead);
+
+            // Unlike the ordinary vacatedSpots-to-air positions (a genuine
+            // relocation with no removal-style notification), this exact spot
+            // is instantaneously overwritten by another real block - the
+            // piston head - within this same moveBlocks call. From the
+            // observer's perspective that's the same "gone right now" moment
+            // as the toDestroy loop above, so it gets the same instant update.
+            fireObserverRemovalUpdate(headPos, headOriginalState);
         }
 
         for (Map.Entry<BlockPos, BlockState> entry : vacatedSpots.entrySet()) {
             BlockPos p = entry.getKey();
             level.setBlockRaw(p, Blocks.AIR.defaultBlockState());
             level.fireShapeUpdates(p);
-            fireObserverRemovalUpdate(p, entry.getValue());
         }
 
         for (int i = toPush.size() - 1; i >= 0; i--) {
