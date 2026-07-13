@@ -42,9 +42,25 @@ public class VirtualLevel {
         return originTracker.getOrDefault(current.immutable(), current.immutable());
     }
 
+    // Maps a displaced block's real-world origin to wherever it currently
+    // sits, for EVERY block PistonMechanics has ever recorded a displacement
+    // for. Unlike originTracker above (which forgets a block the instant it
+    // lands back home, since that map exists purely to redirect
+    // piston/observer display anchors), this one keeps the entry for the
+    // rest of the run even after the block returns to its starting spot -
+    // that's what lets a block that moved out and came all the way back
+    // show up net-0. Piston heads are never in here: moveBlocks only calls
+    // recordDisplacement for the toPush list, never for the head placeholder.
+    // Blocks PistonMechanics never touched at all (e.g. something the user
+    // forgot to actually attach to the moving structure) are also net-0 but
+    // don't get an entry here - spawnDisplacementDisplays backfills those
+    // separately from a pre-run snapshot before reading this map.
+    private final Map<BlockPos, BlockPos> displacedOriginToFinalPos = new LinkedHashMap<>();
+
     void recordDisplacement(BlockPos oldPos, BlockPos newPos) {
         BlockPos origin = getOriginPos(oldPos);
         originTracker.remove(oldPos.immutable());
+        displacedOriginToFinalPos.put(origin, newPos.immutable());
         if (origin.equals(newPos)) {
             originTracker.remove(newPos.immutable()); // moved back home, stop tracking
         } else {
@@ -273,6 +289,13 @@ public class VirtualLevel {
     // a filtered one - see spawnFullDisplay.
     private final Map<BlockPos, String> fullDisplayText = new LinkedHashMap<>();
 
+    // Same idea as fullDisplayText, but for the "." displacement markers
+    // spawned by spawnDisplacementDisplays - kept in its own map so a marker
+    // can never collide with/overwrite a piston or observer row that
+    // happens to land on the same block position. Also never cleared, for
+    // the same resummon reasons as fullDisplayText.
+    private final Map<BlockPos, String> displacementDisplayText = new LinkedHashMap<>();
+
     // Spawns the actual text_display entities once the whole simulation is
     // done. Up to two actions land on one row, colored by type (§b light
     // blue for turning ON / §d pink for turning OFF). Unlike pistons, there
@@ -295,6 +318,73 @@ public class VirtualLevel {
             spawnGtDisplay(mapEntry.getKey(), text);
         }
         observerDisplayEntries.clear();
+    }
+
+    // Spawns a small "." marker over every non-piston, non-observer block
+    // that either PistonMechanics recorded a displacement for, or that just
+    // sat completely untouched for the whole run, once the whole simulation
+    // is done:
+    //   - §c red "."    if it ended the run back at the exact position it
+    //                    started the simulation from (net displacement 0) -
+    //                    this includes blocks that never moved a single
+    //                    time, e.g. something the user forgot to attach to
+    //                    a moving structure.
+    //   - nothing at all if it ended up a net one block away.
+    //   - §6 orange "." if it ended up a net two blocks away.
+    //   - nothing at all for anything past two blocks - no marker defined.
+    // Displacement is measured as the Manhattan distance between a block's
+    // original position and where it actually ended up, which collapses to
+    // the plain block-count of straight-line offset for the common
+    // single-axis push/pull case.
+    private void spawnDisplacementDisplays(Map<BlockPos, BlockState> initialBlocks) {
+        // Backfill: recordDisplacement only ever fires for blocks a piston
+        // actually grabbed, so anything it never touched has no entry in
+        // displacedOriginToFinalPos at all. Walk the pre-run snapshot and
+        // add a same-position (net-0) entry for every block that's still
+        // sitting there untouched, so it gets picked up by the loop below
+        // exactly like a block that moved out and came all the way back.
+        for (Map.Entry<BlockPos, BlockState> initialEntry : initialBlocks.entrySet()) {
+            BlockPos origin = initialEntry.getKey();
+            if (displacedOriginToFinalPos.containsKey(origin)) continue; // already handled below
+
+            BlockState initialState = initialEntry.getValue();
+            if (initialState.isAir()) continue;
+            // Pistons and observers already get their own dedicated Extend/Retract
+            // or ON/OFF display at this exact position, and a stationary one would
+            // otherwise *always* qualify as "never moved" - skip them so we don't
+            // stack a redundant, always-true marker on top of that display.
+            if (initialState.getBlock() instanceof PistonBaseBlock) continue;
+            if (initialState.getBlock() instanceof PistonHeadBlock) continue;
+            if (initialState.is(Blocks.OBSERVER)) continue;
+
+            // Only count it as "never moved" if the same block is still actually
+            // sitting there - a block that got destroyed outright (toDestroy)
+            // shouldn't get a "stayed home" marker.
+            if (!getBlockState(origin).is(initialState.getBlock())) continue;
+
+            displacedOriginToFinalPos.put(origin, origin);
+        }
+
+        for (Map.Entry<BlockPos, BlockPos> mapEntry : displacedOriginToFinalPos.entrySet()) {
+            BlockPos origin = mapEntry.getKey();
+            BlockPos finalPos = mapEntry.getValue();
+
+            int displacement = Math.abs(finalPos.getX() - origin.getX())
+                    + Math.abs(finalPos.getY() - origin.getY())
+                    + Math.abs(finalPos.getZ() - origin.getZ());
+
+            String text;
+            if (displacement == 0) {
+                text = "§c█"; // red - ended back at home (or never moved at all)
+            } else if (displacement == 2) {
+                text = "§6█"; // orange - ended two blocks out
+            } else {
+                continue; // net displacement of 1 (or 3+) gets no marker
+            }
+
+            displacementDisplayText.put(origin, text);
+            spawnGtDisplay(origin, text);
+        }
     }
 
     // Records this tick's Extend/Retract events into each piston's running
@@ -447,7 +537,11 @@ public class VirtualLevel {
             spawnGtDisplay(group.getKey(), text);
         }
 
-        return byPos.size();
+        for (Map.Entry<BlockPos, String> entry : displacementDisplayText.entrySet()) {
+            spawnGtDisplay(entry.getKey(), entry.getValue());
+        }
+
+        return byPos.size() + displacementDisplayText.size();
     }
 
     /**
@@ -465,7 +559,10 @@ public class VirtualLevel {
         for (Map.Entry<BlockPos, String> entry : fullDisplayText.entrySet()) {
             spawnGtDisplay(entry.getKey(), entry.getValue());
         }
-        return fullDisplayText.size();
+        for (Map.Entry<BlockPos, String> entry : displacementDisplayText.entrySet()) {
+            spawnGtDisplay(entry.getKey(), entry.getValue());
+        }
+        return fullDisplayText.size() + displacementDisplayText.size();
     }
 
     private void killAllTextDisplays() {
@@ -596,6 +693,12 @@ public class VirtualLevel {
 
     public void runTickLoop(int maxTicks) {
 
+        // Snapshot the block layout before anything moves - spawnDisplacementDisplays
+        // uses this afterward to also flag blocks that never moved at all (not just
+        // ones that moved and came back home), since recordDisplacement alone can
+        // only ever tell us about blocks PistonMechanics actually grabbed.
+        Map<BlockPos, BlockState> initialBlocks = new HashMap<>(blocks);
+
         for (currentTick = 0; currentTick < maxTicks; currentTick++) {
             boolean active = false;
 
@@ -652,6 +755,9 @@ public class VirtualLevel {
         spawnObserverDisplays();
         // ...and build the uncapped POI action list from the parallel feed.
         buildPoiEntries();
+        // ...and a "." marker for every other block that ended the run net-0
+        // or net-2 away from where it started.
+        spawnDisplacementDisplays(initialBlocks);
     }
     public int getCurrentTick() {
         return currentTick;
