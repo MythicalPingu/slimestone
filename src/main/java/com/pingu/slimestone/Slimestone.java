@@ -45,6 +45,15 @@ public class Slimestone implements ModInitializer {
     // /poi <gt> can reuse it. Starts at 3 until the player sets one.
     private static int lastPoiWindow = 3;
 
+    // True whenever the last thing the player asked to see was a windowed
+    // /poi <gt> [window] view, rather than the full end-of-run display. While
+    // this is true, a resimulation triggered by a world change re-renders the
+    // same POI window instead of falling back to the full display, and the
+    // displacement ("." / "█") display system is skipped entirely. Only a
+    // bare /poi (no arguments) turns this back off.
+    private static boolean poiModeActive = false;
+    private static int lastPoiGt = 0;
+
     @Override
     public void onInitialize() {
         INSTANCE = this;
@@ -183,6 +192,7 @@ public class Slimestone implements ModInitializer {
                             return 0;
                         }
 
+                        poiModeActive = false;
                         int shown = lastSimLevel.spawnFullDisplay();
 
                         player.sendSystemMessage(Component.literal(
@@ -200,6 +210,8 @@ public class Slimestone implements ModInitializer {
                                 }
 
                                 int gt = IntegerArgumentType.getInteger(context, "gt");
+                                poiModeActive = true;
+                                lastPoiGt = gt;
                                 int shown = lastSimLevel.spawnPointOfInterest(gt, lastPoiWindow);
 
                                 player.sendSystemMessage(Component.literal(
@@ -219,6 +231,8 @@ public class Slimestone implements ModInitializer {
 
                                         int gt = IntegerArgumentType.getInteger(context, "gt");
                                         int window = IntegerArgumentType.getInteger(context, "window");
+                                        poiModeActive = true;
+                                        lastPoiGt = gt;
                                         lastPoiWindow = window;
                                         int shown = lastSimLevel.spawnPointOfInterest(gt, window);
 
@@ -237,6 +251,7 @@ public class Slimestone implements ModInitializer {
         trackedPlayer = player;
         trackedOrigin = origin.immutable();
         trackingEnabled = true;
+        poiModeActive = false;
 
         player.sendSystemMessage(Component.literal(
                 "§a[Slimestone] Tracking enabled at " + trackedOrigin.toShortString()));
@@ -249,8 +264,23 @@ public class Slimestone implements ModInitializer {
         trackedOrigin = null;
         trackedPlayer = null;
         pendingSimRun = false;
+        poiModeActive = false;
+
+        killAllDisplayEntities(player);
 
         player.sendSystemMessage(Component.literal("§e[Slimestone] Tracking disabled."));
+    }
+
+    // Kills every display entity type (text, block, and item displays), not
+    // just the text_display rows the simulation itself uses - a clean stop
+    // should leave nothing behind regardless of what spawned it.
+    private void killAllDisplayEntities(ServerPlayer player) {
+        for (String type : new String[] {"text_display", "block_display", "item_display"}) {
+            player.getServer().getCommands().performPrefixedCommand(
+                    player.createCommandSourceStack().withSuppressedOutput(),
+                    "kill @e[type=minecraft:" + type + "]"
+            );
+        }
     }
 
     /**
@@ -379,9 +409,12 @@ public class Slimestone implements ModInitializer {
             //level.log("Observer at " + targetPos.toShortString() + " — simulating artificial update");
             level.scheduleTick(targetPos, Blocks.OBSERVER, 2);
         } else {
-            //player.sendSystemMessage(Component.literal(
-            //        "§c[Slimestone] Target is not a piston or observer!"));
-            return;
+            // Note block or trapdoor: pretend its redstone state just flipped.
+            // Anything else (glass, wool, etc.): pretend the block itself just
+            // got broken/removed. Either way this is scheduled as a tile tick
+            // at GT 0 (see VirtualLevel#processScheduledTick), so it runs
+            // through the normal tick loop instead of jumping the queue.
+            level.scheduleTick(targetPos, targetState.getBlock(), 0);
         }
 
         player.getServer().getCommands().performPrefixedCommand(
@@ -389,7 +422,14 @@ public class Slimestone implements ModInitializer {
                 "kill @e[type=minecraft:text_display]"
         );
 
-        level.runTickLoop(1000);
+        level.runTickLoop(1000, poiModeActive);
+
+        if (poiModeActive) {
+            // A change came in while showing a windowed /poi view - keep
+            // showing that same window against the fresh simulation instead
+            // of falling back to the full end-of-run display.
+            level.spawnPointOfInterest(lastPoiGt, lastPoiWindow);
+        }
 
         int expCount = ObserverDebugger.expected.size();
         //player.sendSystemMessage(Component.literal(

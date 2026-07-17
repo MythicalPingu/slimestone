@@ -300,7 +300,7 @@ public class VirtualLevel {
     // done. Up to two actions land on one row, colored by type (§b light
     // blue for turning ON / §d pink for turning OFF). Unlike pistons, there
     // is no special-case recoloring when only one action is found.
-    private void spawnObserverDisplays() {
+    private void spawnObserverDisplays(boolean poiMode) {
         for (Map.Entry<BlockPos, ObserverDisplayEntry> mapEntry : observerDisplayEntries.entrySet()) {
             List<ObserverActionRecord> actions = mapEntry.getValue().actions;
             if (actions.isEmpty()) continue;
@@ -315,7 +315,12 @@ public class VirtualLevel {
             }
             String text = line.toString();
             fullDisplayText.put(mapEntry.getKey(), text);
-            spawnGtDisplay(mapEntry.getKey(), text);
+            // While in poi mode we still record the full-run text (so a later
+            // bare /poi can restore it), but we don't actually summon it here -
+            // the poi-filtered view is what should be on screen instead.
+            if (!poiMode) {
+                spawnGtDisplay(mapEntry.getKey(), text);
+            }
         }
         observerDisplayEntries.clear();
     }
@@ -425,7 +430,7 @@ public class VirtualLevel {
     // done. Two actions land on one row colored by type (§e extend / §a
     // retract); a piston with only a single action ever gets that one
     // number recolored §6 (orange) instead.
-    private void spawnPistonDisplays() {
+    private void spawnPistonDisplays(boolean poiMode) {
         for (Map.Entry<BlockPos, PistonDisplayEntry> mapEntry : pistonDisplayEntries.entrySet()) {
             List<PistonActionRecord> actions = mapEntry.getValue().actions;
             if (actions.isEmpty()) continue;
@@ -454,7 +459,12 @@ public class VirtualLevel {
 
             String text = firstLine + "\n" + secondLine;
             fullDisplayText.put(mapEntry.getKey(), text);
-            spawnGtDisplay(mapEntry.getKey(), text);
+            // While in poi mode we still record the full-run text (so a later
+            // bare /poi can restore it), but we don't actually summon it here -
+            // the poi-filtered view is what should be on screen instead.
+            if (!poiMode) {
+                spawnGtDisplay(mapEntry.getKey(), text);
+            }
         }
         pistonDisplayEntries.clear();
     }
@@ -537,11 +547,11 @@ public class VirtualLevel {
             spawnGtDisplay(group.getKey(), text);
         }
 
-        for (Map.Entry<BlockPos, String> entry : displacementDisplayText.entrySet()) {
-            spawnGtDisplay(entry.getKey(), entry.getValue());
-        }
+        // Displacement ("." / "█") markers are part of the full-run
+        // displacement display system, which is intentionally skipped while
+        // in poi mode - only the windowed piston/observer actions show here.
 
-        return byPos.size() + displacementDisplayText.size();
+        return byPos.size();
     }
 
     /**
@@ -691,7 +701,7 @@ public class VirtualLevel {
 
     }
 
-    public void runTickLoop(int maxTicks) {
+    public void runTickLoop(int maxTicks, boolean poiMode) {
 
         // Snapshot the block layout before anything moves - spawnDisplacementDisplays
         // uses this afterward to also flag blocks that never moved at all (not just
@@ -750,14 +760,17 @@ public class VirtualLevel {
         }
 
         // Simulation window is over - spawn each piston's merged Extend/Retract row now.
-        spawnPistonDisplays();
+        spawnPistonDisplays(poiMode);
         // ...and each observer's merged ON/OFF row.
-        spawnObserverDisplays();
+        spawnObserverDisplays(poiMode);
         // ...and build the uncapped POI action list from the parallel feed.
         buildPoiEntries();
         // ...and a "." marker for every other block that ended the run net-0
-        // or net-2 away from where it started.
-        spawnDisplacementDisplays(initialBlocks);
+        // or net-2 away from where it started - but never while in poi mode,
+        // which doesn't use the displacement display system at all.
+        if (!poiMode) {
+            spawnDisplacementDisplays(initialBlocks);
+        }
     }
     public int getCurrentTick() {
         return currentTick;
@@ -775,6 +788,17 @@ public class VirtualLevel {
             processObserverTick(tick.pos(), state);
         } else if (tick.type() == Blocks.REDSTONE_LAMP) {
             processRedstoneLampTick(tick.pos(), state);
+        } else if (tick.type() == Blocks.NOTE_BLOCK) {
+            processForcedNoteBlockTick(tick.pos(), state);
+        } else if (tick.type() instanceof TrapDoorBlock) {
+            processForcedTrapDoorTick(tick.pos(), state);
+        } else {
+            // Nothing else in this simulation ever schedules a tick for any
+            // other block type - this is exclusively the /slimestone starting
+            // event for "any block that isn't a piston/observer/note
+            // block/trapdoor" (see Slimestone#runSimulation), so treat it as
+            // that block having just been broken/removed.
+            processForcedRemovalTick(tick.pos(), state);
         }
     }
 
@@ -1091,6 +1115,20 @@ public class VirtualLevel {
         setBlock(pos, state.setValue(BlockStateProperties.POWERED, signal), UPDATE_ALL);
     }
 
+    /**
+     * The /slimestone starting event for a note block: rather than computing
+     * whether the real neighbor signal would flip POWERED (like
+     * {@link #handleNoteBlockNeighborChanged}), this just forces it to the
+     * opposite of whatever it currently is - we're pretending the player
+     * triggered it directly, right at GT 0, and want to see what that does
+     * downstream.
+     */
+    private void processForcedNoteBlockTick(BlockPos pos, BlockState state) {
+        boolean newPowered = !state.getValue(BlockStateProperties.POWERED);
+        //log("§a[NoteBlock] " + pos.toShortString() + " → POWERED=" + newPowered + " (forced start)");
+        setBlock(pos, state.setValue(BlockStateProperties.POWERED, newPowered), UPDATE_ALL);
+    }
+
     private BlockState simSetNoteBlockInstrument(BlockPos pos, BlockState state) {
         NoteBlockInstrument above = getBlockState(pos.above()).instrument();
         if (above.worksAboveNoteBlock()) {
@@ -1176,6 +1214,41 @@ public class VirtualLevel {
         // setBlock will fire shape updates (bit 16 not set → shape updates run)
         // but NOT neighbor updates (bit 1 not set), matching vanilla exactly.
         setBlock(pos, newState, UPDATE_CLIENTS);
+    }
+
+    /**
+     * The /slimestone starting event for a trapdoor: rather than computing
+     * whether the real neighbor signal would flip POWERED/OPEN (like
+     * {@link #handleTrapDoorNeighborChanged}), this just forces both to the
+     * opposite of whatever they currently are - we're pretending the player
+     * triggered it directly, right at GT 0, and want to see what that does
+     * downstream.
+     */
+    private void processForcedTrapDoorTick(BlockPos pos, BlockState state) {
+        boolean newState = !state.getValue(BlockStateProperties.POWERED);
+        BlockState updated = state
+                .setValue(BlockStateProperties.POWERED, newState)
+                .setValue(BlockStateProperties.OPEN,    newState);
+
+        //log("§9[TrapDoor] " + pos.toShortString() + " → POWERED=" + newState + ", OPEN=" + newState + " (forced start)");
+        setBlock(pos, updated, UPDATE_CLIENTS);
+    }
+
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ARBITRARY STARTING BLOCK (SIMULATION START)
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * The /slimestone starting event for anything that isn't a piston,
+     * observer, note block, or trapdoor (e.g. glass, wool) - pretends the
+     * block was just broken/removed, right at GT 0, so the simulation can
+     * show what that triggers downstream. Mirrors a real block break:
+     * flag 3 (UPDATE_ALL) so both shape and neighbor updates fire.
+     */
+    private void processForcedRemovalTick(BlockPos pos, BlockState state) {
+        //log("§7[Remove] " + pos.toShortString() + " → AIR (forced start)");
+        setBlock(pos, Blocks.AIR.defaultBlockState(), UPDATE_ALL);
     }
 
 
