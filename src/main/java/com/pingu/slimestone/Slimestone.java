@@ -174,6 +174,37 @@ public class Slimestone implements ModInitializer {
                                 return 1;
                             })
                     )
+
+                    // /slimestone pushlimit -> show the current simulated push limit
+                    // /slimestone pushlimit <X> -> override it (sim-only; the real
+                    // game's 12-block limit is untouched - use a separate mod for that).
+                    // If a session is currently tracking, this triggers a resimulation
+                    // so the change is reflected immediately.
+                    .then(Commands.literal("pushlimit")
+                            .executes(context -> {
+                                ServerPlayer player = context.getSource().getPlayerOrException();
+                                player.sendSystemMessage(Component.literal(
+                                        "§a[Slimestone] Simulated push limit: §f" + SimPistonResolver.MAX_PUSH
+                                                + "§a (vanilla default: §f" + SimPistonResolver.DEFAULT_MAX_PUSH + "§a)"));
+                                return SimPistonResolver.MAX_PUSH;
+                            })
+                            .then(Commands.argument("limit", IntegerArgumentType.integer(1))
+                                    .executes(context -> {
+                                        ServerPlayer player = context.getSource().getPlayerOrException();
+                                        int limit = IntegerArgumentType.getInteger(context, "limit");
+                                        SimPistonResolver.setMaxPush(limit);
+
+                                        player.sendSystemMessage(Component.literal(
+                                                "§a[Slimestone] Simulated push limit set to §f" + limit
+                                                        + "§a (sim-only)."));
+
+                                        if (trackingEnabled && trackedOrigin != null) {
+                                            pendingSimRun = true;
+                                        }
+                                        return limit;
+                                    })
+                            )
+                    )
             );
 
             // /poi <gt> [window] -> re-summon only the actions from the last
@@ -243,6 +274,33 @@ public class Slimestone implements ModInitializer {
                                     })
                             )
                     )
+            );
+
+            // /w -> turn every red stained glass block that the last simulation
+            // moved exactly once (net displacement 1) into white stained glass,
+            // in the real world, without sending a neighbor update. Prints the
+            // number converted to chat, followed by the running total number of
+            // white stained glass blocks now in the tracked contraption region.
+            dispatcher.register(Commands.literal("w")
+                    .executes(context -> {
+                        ServerPlayer player = context.getSource().getPlayerOrException();
+
+                        if (lastSimLevel == null) {
+                            context.getSource().sendFailure(Component.literal(
+                                    "§c[Slimestone] No simulation has been run yet."));
+                            return 0;
+                        }
+
+                        int changed = lastSimLevel.convertMovedOnceRedGlassToWhite();
+                        int totalWhite = lastSimLevel.countWhiteStainedGlassInRegion();
+
+                        player.sendSystemMessage(Component.literal(
+                                "§a[Slimestone] Converted §f" + changed
+                                        + "§a red stained glass block(s) to white."));
+                        player.sendSystemMessage(Component.literal(
+                                "§a[Slimestone] Total white stained glass block(s): §f" + totalWhite));
+                        return changed;
+                    })
             );
         });
     }
@@ -409,11 +467,12 @@ public class Slimestone implements ModInitializer {
             //level.log("Observer at " + targetPos.toShortString() + " — simulating artificial update");
             level.scheduleTick(targetPos, Blocks.OBSERVER, 2);
         } else {
-            // Note block or trapdoor: pretend its redstone state just flipped.
-            // Anything else (glass, wool, etc.): pretend the block itself just
-            // got broken/removed. Either way this is scheduled as a tile tick
-            // at GT 0 (see VirtualLevel#processScheduledTick), so it runs
-            // through the normal tick loop instead of jumping the queue.
+            // Note block, trapdoor, or fence gate: pretend its redstone state
+            // just flipped. Anything else (glass, wool, etc.): pretend the
+            // block itself just got broken/removed. Either way this is
+            // scheduled as a tile tick at GT 0 (see
+            // VirtualLevel#processScheduledTick), so it runs through the
+            // normal tick loop instead of jumping the queue.
             level.scheduleTick(targetPos, targetState.getBlock(), 0);
         }
 

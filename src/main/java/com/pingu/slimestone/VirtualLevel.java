@@ -2,6 +2,7 @@ package com.pingu.slimestone;
 import net.minecraft.world.level.block.Block;
 // ObserverDebugger is in the same package — no extra import needed.
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.Level;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
@@ -57,6 +58,13 @@ public class VirtualLevel {
     // separately from a pre-run snapshot before reading this map.
     private final Map<BlockPos, BlockPos> displacedOriginToFinalPos = new LinkedHashMap<>();
 
+    // The block layout right before the last runTickLoop started moving
+    // anything - same snapshot spawnDisplacementDisplays takes locally, just
+    // also kept here so callers outside the tick loop (e.g. the /w command,
+    // well after the simulation has finished) can still look up what a given
+    // position originally held.
+    private Map<BlockPos, BlockState> initialBlocksSnapshot = new HashMap<>();
+
     void recordDisplacement(BlockPos oldPos, BlockPos newPos) {
         BlockPos origin = getOriginPos(oldPos);
         originTracker.remove(oldPos.immutable());
@@ -70,10 +78,17 @@ public class VirtualLevel {
     // All piston extend/retract simulation lives here
     public final PistonMechanics pistonMechanics;
 
-    // Observers only ever log their first TWO actions total (in whatever order
-    // they actually occur - normally an ON pulse-start followed by an OFF
-    // pulse-end, one per cycle). This cap is only for the *normal* end-of-run
-    // display - see pendingObserverPoiDisplays below for the uncapped POI feed.
+    // Cap on how many actions a single piston/observer accumulates for the
+    // *normal* end-of-run display (see observerActionCount / pistonActionCount
+    // below). The uncapped POI feeds (pendingObserverPoiDisplays /
+    // pendingPistonPoiDisplays) are never subject to this limit.
+    private static final int MAX_LOGGED_ACTIONS = 10;
+
+    // Observers only ever log their first MAX_LOGGED_ACTIONS actions total (in
+    // whatever order they actually occur - normally alternating ON pulse-start
+    // / OFF pulse-end, one pair per cycle). This cap is only for the *normal*
+    // end-of-run display - see pendingObserverPoiDisplays below for the
+    // uncapped POI feed.
     private final Map<BlockPos, Integer> observerActionCount = new HashMap<>();
     private final List<ObserverPendingEvent> pendingObserverDisplays = new ArrayList<>();
     // Accumulates each observer's actions across the whole run; only spawned as
@@ -81,18 +96,19 @@ public class VirtualLevel {
     private final Map<BlockPos, ObserverDisplayEntry> observerDisplayEntries = new LinkedHashMap<>();
 
     // Mirrors pendingObserverDisplays/observerDisplayEntries above, but with no
-    // two-action cap - every observer action gets recorded here so that
+    // action cap - every observer action gets recorded here so that
     // /slimestone poi can show as many actions as actually happened in its
-    // window, not just an observer's first two. Kept fully separate from the
-    // capped pipeline so it can never change the normal display's suffixing.
+    // window, not just an observer's first MAX_LOGGED_ACTIONS. Kept fully
+    // separate from the capped pipeline so it can never change the normal
+    // display's suffixing.
     private final List<ObserverPendingEvent> pendingObserverPoiDisplays = new ArrayList<>();
     private final Map<BlockPos, ObserverDisplayEntry> observerPoiDisplayEntries = new LinkedHashMap<>();
 
-    // Pistons only ever log their first TWO actions total (in whatever order
-    // they actually occur - usually one Extend and one Retract, but a piston
-    // that starts already extended could see a Retract before an Extend).
-    // This cap is only for the *normal* end-of-run display - see
-    // pendingPistonPoiDisplays below for the uncapped POI feed.
+    // Pistons only ever log their first MAX_LOGGED_ACTIONS actions total (in
+    // whatever order they actually occur - usually alternating Extend and
+    // Retract, but a piston that starts already extended could see a Retract
+    // before an Extend). This cap is only for the *normal* end-of-run display -
+    // see pendingPistonPoiDisplays below for the uncapped POI feed.
     private final Map<BlockPos, Integer> pistonActionCount = new HashMap<>();
     private final List<PistonPendingEvent> pendingPistonDisplays = new ArrayList<>();
     // Accumulates each piston's actions across the whole run; only spawned as a
@@ -100,10 +116,11 @@ public class VirtualLevel {
     private final Map<BlockPos, PistonDisplayEntry> pistonDisplayEntries = new LinkedHashMap<>();
 
     // Mirrors pendingPistonDisplays/pistonDisplayEntries above, but with no
-    // two-action cap - every piston action gets recorded here so that
+    // action cap - every piston action gets recorded here so that
     // /slimestone poi can show as many actions as actually happened in its
-    // window, not just a piston's first two. Kept fully separate from the
-    // capped pipeline so it can never change the normal display's suffixing.
+    // window, not just a piston's first MAX_LOGGED_ACTIONS. Kept fully separate
+    // from the capped pipeline so it can never change the normal display's
+    // suffixing.
     private final List<PistonPendingEvent> pendingPistonPoiDisplays = new ArrayList<>();
     private final Map<BlockPos, PistonDisplayEntry> pistonPoiDisplayEntries = new LinkedHashMap<>();
 
@@ -133,7 +150,7 @@ public class VirtualLevel {
     }
 
     private static class ObserverDisplayEntry {
-        final List<ObserverActionRecord> actions = new ArrayList<>(); // at most 2, chronological order
+        final List<ObserverActionRecord> actions = new ArrayList<>(); // at most MAX_LOGGED_ACTIONS, chronological order
     }
 
     private static class PistonPendingEvent {
@@ -170,7 +187,7 @@ public class VirtualLevel {
     public static final int NO_COUNT = -1;
 
     private static class PistonDisplayEntry {
-        final List<PistonActionRecord> actions = new ArrayList<>(); // at most 2, chronological order
+        final List<PistonActionRecord> actions = new ArrayList<>(); // at most MAX_LOGGED_ACTIONS, chronological order
     }
 
     // Package-private so the Resolver can verify moving pistons
@@ -216,9 +233,9 @@ public class VirtualLevel {
         // POI: every action is recorded here, uncapped.
         pendingObserverPoiDisplays.add(new ObserverPendingEvent(displayPos, poweredOn));
 
-        // Normal display: only the first two actions for this observer are ever logged.
+        // Normal display: only the first MAX_LOGGED_ACTIONS actions for this observer are ever logged.
         int count = observerActionCount.getOrDefault(displayPos, 0);
-        if (count >= 2) return;
+        if (count >= MAX_LOGGED_ACTIONS) return;
         observerActionCount.put(displayPos, count + 1);
         pendingObserverDisplays.add(new ObserverPendingEvent(displayPos, poweredOn));
     }
@@ -229,9 +246,9 @@ public class VirtualLevel {
         // POI: every action is recorded here, uncapped.
         pendingPistonPoiDisplays.add(new PistonPendingEvent(displayPos, extending, blockCount));
 
-        // Normal display: only the first two actions for this piston are ever logged.
+        // Normal display: only the first MAX_LOGGED_ACTIONS actions for this piston are ever logged.
         int count = pistonActionCount.getOrDefault(displayPos, 0);
-        if (count >= 2) return;
+        if (count >= MAX_LOGGED_ACTIONS) return;
         pistonActionCount.put(displayPos, count + 1);
         pendingPistonDisplays.add(new PistonPendingEvent(displayPos, extending, blockCount));
     }
@@ -300,15 +317,23 @@ public class VirtualLevel {
     // done. Up to two actions land on one row, colored by type (§b light
     // blue for turning ON / §d pink for turning OFF). Unlike pistons, there
     // is no special-case recoloring when only one action is found.
+    //
+    // If this observer is part of the found structure but ended the run at
+    // net displacement 0 or 2 (see pistonObserverDisplacementColor), its
+    // whole row is force-recolored red/orange instead - in place, on this
+    // same entity, rather than spawning a second overlapping marker entity
+    // (see the fullDisplayText skip in spawnDisplacementDisplays).
     private void spawnObserverDisplays(boolean poiMode) {
         for (Map.Entry<BlockPos, ObserverDisplayEntry> mapEntry : observerDisplayEntries.entrySet()) {
             List<ObserverActionRecord> actions = mapEntry.getValue().actions;
             if (actions.isEmpty()) continue;
 
+            String override = pistonObserverDisplacementColor(mapEntry.getKey());
+
             StringBuilder line = new StringBuilder();
             for (int i = 0; i < actions.size(); i++) {
                 ObserverActionRecord a = actions.get(i);
-                String color = a.poweredOn ? "§b" : "§d";
+                String color = override != null ? override : (a.poweredOn ? "§b" : "§d");
                 String piece = color + a.tick + a.suffix;
                 if (i > 0) line.append(" ");
                 line.append(piece);
@@ -325,10 +350,65 @@ public class VirtualLevel {
         observerDisplayEntries.clear();
     }
 
-    // Spawns a small "." marker over every non-piston, non-observer block
-    // that either PistonMechanics recorded a displacement for, or that just
-    // sat completely untouched for the whole run, once the whole simulation
-    // is done:
+    // Blocks that should NEVER get a "." displacement marker, no matter what
+    // displacement they'd otherwise end up with. Meant for blocks players use
+    // as temporary placeholders (e.g. marking a spot they haven't finished
+    // wiring up yet) that are expected to just sit there untouched - add more
+    // entries here as needed.
+    private static final Set<Block> DISPLACEMENT_DISPLAY_BLACKLIST = Set.of(
+            Blocks.RED_STAINED_GLASS
+    );
+
+    private boolean isBlacklistedFromDisplacementDisplay(BlockState state) {
+        return DISPLACEMENT_DISPLAY_BLACKLIST.contains(state.getBlock());
+    }
+
+    /**
+     * The piston/observer counterpart of the "." displacement check below -
+     * computed independently (not via the shared backfill loop inside
+     * spawnDisplacementDisplays) so it's available in time for
+     * spawnPistonDisplays/spawnObserverDisplays to bake the color directly
+     * into a piston/observer's own action-row text, instead of a second
+     * text_display entity being spawned at the exact same position. Two
+     * text_display entities stacked on one block don't reliably both render -
+     * this is why "part of the structure but didn't move" pistons/observers
+     * previously never appeared to show red at all: any marker for them
+     * would have silently overlapped their own Extend/Retract or ON/OFF row.
+     *
+     * @return "§c" (red) if this position ended the run at net displacement 0
+     *         from where it started (including never having moved a single
+     *         time), "§6" (orange) if it ended up a net two blocks away, or
+     *         null if displacement is 1/3+, the position wasn't part of the
+     *         pre-run snapshot, or it's blacklisted from the marker system.
+     */
+    private String pistonObserverDisplacementColor(BlockPos origin) {
+        BlockState initialState = initialBlocksSnapshot.get(origin);
+        if (initialState == null || initialState.isAir()) return null;
+        if (isBlacklistedFromDisplacementDisplay(initialState)) return null;
+
+        BlockPos finalPos;
+        if (displacedOriginToFinalPos.containsKey(origin)) {
+            finalPos = displacedOriginToFinalPos.get(origin);
+        } else {
+            // Never recorded as displaced at all - only counts as "never
+            // moved" if the same block is still actually sitting there (not
+            // destroyed some other way).
+            if (!getBlockState(origin).is(initialState.getBlock())) return null;
+            finalPos = origin;
+        }
+
+        int displacement = Math.abs(finalPos.getX() - origin.getX())
+                + Math.abs(finalPos.getY() - origin.getY())
+                + Math.abs(finalPos.getZ() - origin.getZ());
+
+        if (displacement == 0) return "§c";
+        if (displacement == 2) return "§6";
+        return null; // net displacement of 1 (or 3+) gets no marker
+    }
+
+    // Spawns a small "." marker over every block that either PistonMechanics
+    // recorded a displacement for, or that just sat completely untouched for
+    // the whole run, once the whole simulation is done:
     //   - §c red "."    if it ended the run back at the exact position it
     //                    started the simulation from (net displacement 0) -
     //                    this includes blocks that never moved a single
@@ -337,6 +417,14 @@ public class VirtualLevel {
     //   - nothing at all if it ended up a net one block away.
     //   - §6 orange "." if it ended up a net two blocks away.
     //   - nothing at all for anything past two blocks - no marker defined.
+    //   - nothing at all if the block's type is in DISPLACEMENT_DISPLAY_BLACKLIST
+    //                    above, regardless of displacement.
+    // Pistons and observers ARE included here (for the ones that never logged
+    // a single action, so spawnPistonDisplays/spawnObserverDisplays never ran
+    // for them at all) - but any position that already has a fullDisplayText
+    // entry is skipped, since that means it already got its own action-row
+    // entity recolored red/orange in place (see pistonObserverDisplacementColor)
+    // and spawning a second marker on top of it would just silently overlap.
     // Displacement is measured as the Manhattan distance between a block's
     // original position and where it actually ended up, which collapses to
     // the plain block-count of straight-line offset for the common
@@ -354,13 +442,9 @@ public class VirtualLevel {
 
             BlockState initialState = initialEntry.getValue();
             if (initialState.isAir()) continue;
-            // Pistons and observers already get their own dedicated Extend/Retract
-            // or ON/OFF display at this exact position, and a stationary one would
-            // otherwise *always* qualify as "never moved" - skip them so we don't
-            // stack a redundant, always-true marker on top of that display.
-            if (initialState.getBlock() instanceof PistonBaseBlock) continue;
+            // Piston heads are just the transient placeholder for an extended
+            // piston's head, not a real placed block on their own - never flag them.
             if (initialState.getBlock() instanceof PistonHeadBlock) continue;
-            if (initialState.is(Blocks.OBSERVER)) continue;
 
             // Only count it as "never moved" if the same block is still actually
             // sitting there - a block that got destroyed outright (toDestroy)
@@ -373,6 +457,17 @@ public class VirtualLevel {
         for (Map.Entry<BlockPos, BlockPos> mapEntry : displacedOriginToFinalPos.entrySet()) {
             BlockPos origin = mapEntry.getKey();
             BlockPos finalPos = mapEntry.getValue();
+
+            // A piston/observer that logged at least one action already got
+            // its own text entity spawned above, recolored in place if it
+            // qualifies - don't spawn a second, overlapping entity for it.
+            if (fullDisplayText.containsKey(origin)) continue;
+
+            // Skip blacklisted blocks entirely - e.g. a red stained glass
+            // placeholder is *supposed* to sit there untouched, so it
+            // shouldn't get flagged as "never moved".
+            BlockState originalState = initialBlocks.get(origin);
+            if (originalState != null && isBlacklistedFromDisplacementDisplay(originalState)) continue;
 
             int displacement = Math.abs(finalPos.getX() - origin.getX())
                     + Math.abs(finalPos.getY() - origin.getY())
@@ -390,6 +485,83 @@ public class VirtualLevel {
             displacementDisplayText.put(origin, text);
             spawnGtDisplay(origin, text);
         }
+    }
+
+    /**
+     * The real-world counterpart to the §c/§6 markers above, but for red
+     * stained glass specifically - which DISPLACEMENT_DISPLAY_BLACKLIST
+     * keeps from ever getting one of those, since it's normally used as a
+     * "stays put" placeholder. This walks every red stained glass block from
+     * the pre-run snapshot, computes the same net-displacement (Manhattan
+     * distance from origin to final position) spawnDisplacementDisplays
+     * uses, and for every one that comes out to exactly 1 - the "no marker"
+     * case for any other block type - swaps the REAL block at its origin
+     * position from red to white stained glass, the same way vanilla's
+     * {@code /setblock ... strict} would: no block update, no shape update.
+     * That's the in-world way to flag "moved exactly once" for a block type
+     * that can't show it via the usual marker.
+     * <p>
+     * Only touches positions still actually holding real red stained glass
+     * (in case the world has changed since the simulation ran), and edits
+     * the real level the same way vanilla's {@code /setblock ... strict}
+     * does: flag 18 (UPDATE_CLIENTS | UPDATE_KNOWN_SHAPE) - clients see the
+     * swap, but no block update fires (so no observer watching this
+     * position can detect it) and no shape update fires either (so nothing
+     * downstream gets recalculated from it).
+     *
+     * @return the number of blocks converted
+     */
+    public int convertMovedOnceRedGlassToWhite() {
+        int count = 0;
+        Level realLevel = player.level();
+
+        for (Map.Entry<BlockPos, BlockState> entry : initialBlocksSnapshot.entrySet()) {
+            BlockPos origin = entry.getKey();
+            BlockState initialState = entry.getValue();
+            if (!initialState.is(Blocks.RED_STAINED_GLASS)) continue;
+
+            BlockPos finalPos = displacedOriginToFinalPos.get(origin);
+            if (finalPos == null) continue; // never displaced at all - net 0, not net 1
+
+            int displacement = Math.abs(finalPos.getX() - origin.getX())
+                    + Math.abs(finalPos.getY() - origin.getY())
+                    + Math.abs(finalPos.getZ() - origin.getZ());
+            if (displacement != 1) continue; // only the "moved exactly once" case
+
+            if (!realLevel.getBlockState(origin).is(Blocks.RED_STAINED_GLASS)) continue;
+
+            // Flag 18 = UPDATE_CLIENTS (2) | UPDATE_KNOWN_SHAPE (16) - same as
+            // vanilla /setblock's "strict" mode: no block update, no shape
+            // update, purely a silent visual swap of the stored state.
+            realLevel.setBlock(origin, Blocks.WHITE_STAINED_GLASS.defaultBlockState(), 18);
+            count++;
+        }
+
+        return count;
+    }
+
+    /**
+     * Counts how many blocks are currently white stained glass in the real
+     * world, scanning the same position set {@link #convertMovedOnceRedGlassToWhite}
+     * draws from (the last simulation's tracked contraption region, via
+     * {@code initialBlocksSnapshot}). This is a running total - it includes
+     * white stained glass placed by earlier {@code /w} calls, or that was
+     * simply already white before any conversion happened - not just the
+     * blocks converted this call.
+     *
+     * @return the number of white stained glass blocks found in the region
+     */
+    public int countWhiteStainedGlassInRegion() {
+        int count = 0;
+        Level realLevel = player.level();
+
+        for (BlockPos pos : initialBlocksSnapshot.keySet()) {
+            if (realLevel.getBlockState(pos).is(Blocks.WHITE_STAINED_GLASS)) {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     // Records this tick's Extend/Retract events into each piston's running
@@ -427,13 +599,21 @@ public class VirtualLevel {
     }
 
     // Spawns the actual text_display entities once the whole simulation is
-    // done. Two actions land on one row colored by type (§e extend / §a
+    // done. Multiple actions land on one row colored by type (§e extend / §a
     // retract); a piston with only a single action ever gets that one
     // number recolored §6 (orange) instead.
+    //
+    // If this piston is part of the found structure but ended the run at net
+    // displacement 0 or 2 (see pistonObserverDisplacementColor), every piece
+    // is force-recolored red/orange instead - in place, on this same entity,
+    // rather than spawning a second overlapping marker entity (see the
+    // fullDisplayText skip in spawnDisplacementDisplays).
     private void spawnPistonDisplays(boolean poiMode) {
         for (Map.Entry<BlockPos, PistonDisplayEntry> mapEntry : pistonDisplayEntries.entrySet()) {
             List<PistonActionRecord> actions = mapEntry.getValue().actions;
             if (actions.isEmpty()) continue;
+
+            String override = pistonObserverDisplacementColor(mapEntry.getKey());
 
             String[] topPieces = new String[actions.size()];
             String[] bottomPieces = new String[actions.size()];
@@ -441,18 +621,29 @@ public class VirtualLevel {
             StringBuilder firstLine = new StringBuilder();
             for (int i = 0; i < actions.size(); i++) {
                 PistonActionRecord a = actions.get(i);
-                String color = actions.size() == 1 ? "§6" : (a.extending ? "§e" : "§a");
+                String color = override != null ? override : (actions.size() == 1 ? "§6" : (a.extending ? "§e" : "§a"));
                 topPieces[i] = color + a.tick + a.suffix;
                 if (i > 0) firstLine.append(" ");
                 firstLine.append(topPieces[i]);
             }
 
+            boolean sticky = isStickyPistonAt(mapEntry.getKey());
             StringBuilder secondLine = new StringBuilder();
             for (int i = 0; i < actions.size(); i++) {
                 PistonActionRecord a = actions.get(i);
-                if (a.blockCount == NO_COUNT) continue; // nothing meaningful to show for this action
-                String countColor = a.blockCount > 12 ? "§c" : (a.extending ? "§e" : "§a");
-                bottomPieces[i] = countColor + a.blockCount;
+                String bottomColor = override != null ? override : (actions.size() == 1 ? "§6" : (a.extending ? "§e" : "§a"));
+                if (!a.extending && !sticky) {
+                    // A normal piston's retract never pulls anything, so
+                    // there's no push-limit number to show - just mark the row.
+                    bottomPieces[i] = bottomColor + "-";
+                } else if (a.blockCount != NO_COUNT) {
+                    // Sticky-piston retracts pull blocks the same way extends
+                    // push them, so show the pull count exactly like a push count.
+                    String countColor = override != null ? override : (a.blockCount > SimPistonResolver.MAX_PUSH ? "§c" : bottomColor);
+                    bottomPieces[i] = countColor + a.blockCount;
+                } else {
+                    continue; // nothing meaningful to show for this action
+                }
                 if (secondLine.length() > 0) secondLine.append(" ");
                 secondLine.append(bottomPieces[i]);
             }
@@ -498,8 +689,9 @@ public class VirtualLevel {
      * (inclusive on both ends), replacing whatever text displays currently
      * exist. Multiple matching actions at the same block still land on one
      * display, same as a normal run. Unlike the normal end-of-run display,
-     * this is not limited to an observer/piston's first two actions - every
-     * action recorded for a block that falls inside the window is shown.
+     * this is not limited to an observer/piston's first MAX_LOGGED_ACTIONS
+     * actions - every action recorded for a block that falls inside the
+     * window is shown.
      * <p>
      * The GT shown on each display is the actual simulation tick the action
      * happened on - {@code centerGt} is only used to pick which actions fall
@@ -527,8 +719,14 @@ public class VirtualLevel {
                 if (e.isPiston()) {
                     String color = e.stateOn() ? "§e" : "§a"; // extend / retract
                     topPiece = color + gt + e.suffix();
-                    if (e.blockCount() != NO_COUNT) {
-                        String countColor = e.blockCount() > 12 ? "§c" : (e.stateOn() ? "§e" : "§a");
+                    if (!e.stateOn() && !isStickyPistonAt(e.pos())) {
+                        // A normal piston's retract never pulls anything, so
+                        // there's no push-limit number to show - just mark the row.
+                        bottomPiece = color + "-";
+                    } else if (e.blockCount() != NO_COUNT) {
+                        // Sticky-piston retracts pull blocks the same way
+                        // extends push them - show the pull count like a push count.
+                        String countColor = e.blockCount() > SimPistonResolver.MAX_PUSH ? "§c" : color;
                         bottomPiece = countColor + e.blockCount();
                     }
                 } else {
@@ -614,6 +812,28 @@ public class VirtualLevel {
 
     public BlockState getBlockState(BlockPos pos) {
         return blocks.getOrDefault(pos, Blocks.AIR.defaultBlockState());
+    }
+
+    /**
+     * True if the piston base sitting at {@code pos} is a sticky piston.
+     * <p>
+     * Piston bases never change position, but their block IDENTITY does
+     * change mid-animation: a retracting base is briefly replaced with
+     * {@code Blocks.MOVING_PISTON} (see PistonMechanics.triggerPistonEvent)
+     * and only flips back to PISTON/STICKY_PISTON once its
+     * SimPistonMovingEntity finishes ticking, a couple ticks later. Display
+     * building can happen while that's still in flight, so the live block
+     * state at {@code pos} isn't reliable here - read the pre-run snapshot
+     * first (captured before anything started moving, so it always has the
+     * real piston type), and only fall back to the live state if this
+     * position wasn't part of that snapshot at all.
+     */
+    private boolean isStickyPistonAt(BlockPos pos) {
+        BlockState initial = initialBlocksSnapshot.get(pos);
+        if (initial != null && (initial.is(Blocks.PISTON) || initial.is(Blocks.STICKY_PISTON))) {
+            return initial.is(Blocks.STICKY_PISTON);
+        }
+        return getBlockState(pos).is(Blocks.STICKY_PISTON);
     }
 
     public void setBlockRaw(BlockPos pos, BlockState state) {
@@ -708,6 +928,7 @@ public class VirtualLevel {
         // ones that moved and came back home), since recordDisplacement alone can
         // only ever tell us about blocks PistonMechanics actually grabbed.
         Map<BlockPos, BlockState> initialBlocks = new HashMap<>(blocks);
+        initialBlocksSnapshot = initialBlocks;
 
         for (currentTick = 0; currentTick < maxTicks; currentTick++) {
             boolean active = false;
@@ -792,12 +1013,14 @@ public class VirtualLevel {
             processForcedNoteBlockTick(tick.pos(), state);
         } else if (tick.type() instanceof TrapDoorBlock) {
             processForcedTrapDoorTick(tick.pos(), state);
+        } else if (tick.type() instanceof FenceGateBlock) {
+            processForcedFenceGateTick(tick.pos(), state);
         } else {
             // Nothing else in this simulation ever schedules a tick for any
             // other block type - this is exclusively the /slimestone starting
             // event for "any block that isn't a piston/observer/note
-            // block/trapdoor" (see Slimestone#runSimulation), so treat it as
-            // that block having just been broken/removed.
+            // block/trapdoor/fence gate" (see Slimestone#runSimulation), so
+            // treat it as that block having just been broken/removed.
             processForcedRemovalTick(tick.pos(), state);
         }
     }
@@ -893,6 +1116,11 @@ public class VirtualLevel {
         // --- TRAPDOOR ---
         else if (state.getBlock() instanceof TrapDoorBlock) {
             handleTrapDoorNeighborChanged(pos, state);
+        }
+
+        // --- FENCE GATE ---
+        else if (state.getBlock() instanceof FenceGateBlock) {
+            handleFenceGateNeighborChanged(pos, state);
         }
 
         // --- PISTON LOGIC (delegated to PistonMechanics) ---
@@ -1231,6 +1459,58 @@ public class VirtualLevel {
                 .setValue(BlockStateProperties.OPEN,    newState);
 
         //log("§9[TrapDoor] " + pos.toShortString() + " → POWERED=" + newState + ", OPEN=" + newState + " (forced start)");
+        setBlock(pos, updated, UPDATE_CLIENTS);
+    }
+
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FENCE GATE
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Mirrors {@code FenceGateBlock.neighborChanged}.
+     * <p>
+     * Like a trapdoor, OPEN always tracks POWERED for redstone-driven changes.
+     * Vanilla calls {@code level.setBlock(pos, newState, 2)} — flag 2 is
+     * UPDATE_CLIENTS, which (in our setBlock) fires shape updates but NOT
+     * neighbor updates.
+     */
+    private void handleFenceGateNeighborChanged(BlockPos pos, BlockState state) {
+        boolean signal    = simHasNeighborSignal(pos);
+        boolean wasPowered = state.getValue(BlockStateProperties.POWERED);
+        if (signal == wasPowered) return;
+
+        BlockState newState = state
+                .setValue(BlockStateProperties.POWERED, signal)
+                .setValue(BlockStateProperties.OPEN,    signal);
+
+        //log("§9[FenceGate] " + pos.toShortString() + " → POWERED=" + signal + ", OPEN=" + signal);
+
+        // Flag 2 = UPDATE_CLIENTS only, matching vanilla.
+        setBlock(pos, newState, UPDATE_CLIENTS);
+    }
+
+    /**
+     * The /slimestone starting event for a fence gate: rather than computing
+     * whether the real neighbor signal would flip POWERED/OPEN (like
+     * {@link #handleFenceGateNeighborChanged}), this just forces both to the
+     * opposite of whatever they currently are - we're pretending the player
+     * triggered it directly, right at GT 0, and want to see what that does
+     * downstream.
+     * <p>
+     * Previously fence gates had no dedicated case in either dispatch point,
+     * so they fell through to {@link #processForcedRemovalTick}, which wrongly
+     * deleted the gate (set it to AIR) instead of just toggling it open. That
+     * hole in the piston-pushable row meant PistonMechanics never saw a block
+     * there to push, so nothing downstream of the gate moved.
+     */
+    private void processForcedFenceGateTick(BlockPos pos, BlockState state) {
+        boolean newState = !state.getValue(BlockStateProperties.POWERED);
+        BlockState updated = state
+                .setValue(BlockStateProperties.POWERED, newState)
+                .setValue(BlockStateProperties.OPEN,    newState);
+
+        //log("§9[FenceGate] " + pos.toShortString() + " → POWERED=" + newState + ", OPEN=" + newState + " (forced start)");
         setBlock(pos, updated, UPDATE_CLIENTS);
     }
 

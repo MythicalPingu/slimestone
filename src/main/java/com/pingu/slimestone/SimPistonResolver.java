@@ -23,10 +23,30 @@ public class SimPistonResolver {
     List<BlockPos> toPush = new ArrayList<>();
     List<BlockPos> toDestroy = new ArrayList<>();
 
-    // The real, vanilla-accurate piston push limit. Checked exactly once, in
+    // The real, vanilla-accurate piston push limit. Kept around so the
+    // /slimestone pushlimit command can report and reset back to it.
+    public static final int DEFAULT_MAX_PUSH = 12;
+
+    // The push limit actually enforced by resolve(), below. Defaults to the
+    // vanilla value but can be overridden for simulation-only testing via
+    // /slimestone pushlimit <X> - see setMaxPush(). Checked exactly once, in
     // resolve(), after the full structure (including all sticky branches)
     // has been discovered - see pushLimitExceeded below for why.
-    public static final int MAX_PUSH = 12;
+    public static int MAX_PUSH = DEFAULT_MAX_PUSH;
+
+    /**
+     * Overrides the simulated push limit. Sim-only - this has no effect on
+     * the real game, it just changes what SimPistonResolver.resolve() treats
+     * as "too many blocks" for future simulation runs.
+     *
+     * @throws IllegalArgumentException if {@code newLimit} is less than 1.
+     */
+    public static void setMaxPush(int newLimit) {
+        if (newLimit < 1) {
+            throw new IllegalArgumentException("Push limit must be at least 1, got " + newLimit);
+        }
+        MAX_PUSH = newLimit;
+    }
 
     // Purely defensive: bounds traversal on a pathological/malformed
     // structure so addBlockLine can't loop forever. Deliberately far above
