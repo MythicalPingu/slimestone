@@ -15,6 +15,9 @@ import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import net.minecraft.world.level.block.state.properties.NoteBlockInstrument;
 import net.minecraft.world.level.block.*;
 import net.minecraft.world.level.block.state.properties.SlabType;
+import net.minecraft.world.level.block.Rotation;
+import net.minecraft.world.level.block.Mirror;
+import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate;
 
 import java.util.*;
 
@@ -199,6 +202,26 @@ public class VirtualLevel {
 
     private int currentTick = 0;
     private String currentPhase = "INIT";
+
+    // Origins (real-world, unrotated coordinates) that a rotation-directionality
+    // check has flagged as disagreeing between orientations - i.e. this block
+    // classified as net-0 ("didn't move") or net-2 ("moved too much") in one
+    // orientation but not the other. Empty unless the caller sets it before
+    // render() runs (see runSimulation in Slimestone). When a position is in
+    // here, pistonObserverDisplacementColor and spawnDisplacementDisplays both
+    // force white (§f) instead of red/orange, since the discrepancy - not the
+    // raw displacement - is the interesting signal.
+    private Set<BlockPos> directionalConflicts = Collections.emptySet();
+
+    /**
+     * Sets the positions whose net-0/net-2 markers should be forced white
+     * instead of red/orange for the upcoming render() call, because a
+     * rotated re-simulation disagreed with this run about their fate. Pass
+     * an empty set (the default) to disable the override entirely.
+     */
+    public void setDirectionalConflicts(Set<BlockPos> conflicts) {
+        this.directionalConflicts = conflicts;
+    }
 
     /**
      * Pending scheduled block ticks ("tile ticks"), e.g. an Observer's
@@ -401,8 +424,8 @@ public class VirtualLevel {
                 + Math.abs(finalPos.getY() - origin.getY())
                 + Math.abs(finalPos.getZ() - origin.getZ());
 
-        if (displacement == 0) return "§c";
-        if (displacement == 2) return "§6";
+        if (displacement == 0) return directionalConflicts.contains(origin) ? "§f" : "§c";
+        if (displacement == 2) return directionalConflicts.contains(origin) ? "§f" : "§6";
         return null; // net displacement of 1 (or 3+) gets no marker
     }
 
@@ -475,9 +498,12 @@ public class VirtualLevel {
 
             String text;
             if (displacement == 0) {
-                text = "§c█"; // red - ended back at home (or never moved at all)
+                // red - ended back at home (or never moved at all) - unless a
+                // rotation-directionality check flagged this origin, in which
+                // case white takes over regardless of the raw displacement.
+                text = directionalConflicts.contains(origin) ? "§f█" : "§c█";
             } else if (displacement == 2) {
-                text = "§6█"; // orange - ended two blocks out
+                text = directionalConflicts.contains(origin) ? "§f█" : "§6█"; // orange - ended two blocks out
             } else {
                 continue; // net displacement of 1 (or 3+) gets no marker
             }
@@ -921,7 +947,27 @@ public class VirtualLevel {
 
     }
 
+    /**
+     * Runs the full simulation and immediately renders it (spawns real
+     * text_display entities). Equivalent to {@code simulate(maxTicks)}
+     * followed by {@code render(poiMode)} - kept as a convenience for
+     * existing single-pass callers.
+     */
     public void runTickLoop(int maxTicks, boolean poiMode) {
+        simulate(maxTicks);
+        render(poiMode);
+    }
+
+    /**
+     * Runs the tick simulation only - no text_display entities are spawned
+     * and nothing in the real world is touched. Populates everything
+     * {@link #getDisplacementClassifications()} and {@link #render} need
+     * (initialBlocksSnapshot, displacedOriginToFinalPos, the piston/observer
+     * display-entry maps). Safe to call on a throwaway VirtualLevel (e.g. a
+     * rotated copy used purely to compare against another run) whose results
+     * will never be rendered.
+     */
+    public void simulate(int maxTicks) {
 
         // Snapshot the block layout before anything moves - spawnDisplacementDisplays
         // uses this afterward to also flag blocks that never moved at all (not just
@@ -979,7 +1025,16 @@ public class VirtualLevel {
                 break;
             }
         }
+    }
 
+    /**
+     * Renders the results of the most recent {@link #simulate} call into the
+     * real world as text_display entities. Split out from simulate() so a
+     * caller can inspect/compare simulation results (e.g. via
+     * {@link #getDisplacementClassifications()}) before deciding what, if
+     * anything, should actually be drawn - see setDirectionalConflicts.
+     */
+    public void render(boolean poiMode) {
         // Simulation window is over - spawn each piston's merged Extend/Retract row now.
         spawnPistonDisplays(poiMode);
         // ...and each observer's merged ON/OFF row.
@@ -990,9 +1045,76 @@ public class VirtualLevel {
         // or net-2 away from where it started - but never while in poi mode,
         // which doesn't use the displacement display system at all.
         if (!poiMode) {
-            spawnDisplacementDisplays(initialBlocks);
+            spawnDisplacementDisplays(initialBlocksSnapshot);
         }
     }
+
+    /**
+     * Pure, read-only classification of every tracked origin as it stood at
+     * the end of the most recent {@link #simulate} call: {@code 'R'} for net
+     * displacement 0 ("didn't move" - including never touched at all),
+     * {@code 'O'} for net displacement 2 ("moved too much"), and no entry at
+     * all for net 1/3+ or anything blacklisted. Mirrors exactly the
+     * red/orange logic spawnDisplacementDisplays and
+     * pistonObserverDisplacementColor use, but as data instead of a side
+     * effect - safe to call on a throwaway level that will never be
+     * rendered. Ignores directionalConflicts entirely (that override only
+     * applies at render time).
+     */
+    public Map<BlockPos, Character> getDisplacementClassifications() {
+        // Same backfill as spawnDisplacementDisplays: anything PistonMechanics
+        // never recorded a displacement for, but that's still sitting exactly
+        // where it started, counts as net-0.
+        Map<BlockPos, BlockPos> effective = new LinkedHashMap<>(displacedOriginToFinalPos);
+        for (Map.Entry<BlockPos, BlockState> entry : initialBlocksSnapshot.entrySet()) {
+            BlockPos origin = entry.getKey();
+            if (effective.containsKey(origin)) continue;
+
+            BlockState initial = entry.getValue();
+            if (initial.isAir()) continue;
+            if (initial.getBlock() instanceof PistonHeadBlock) continue;
+            if (!getBlockState(origin).is(initial.getBlock())) continue;
+
+            effective.put(origin, origin);
+        }
+
+        Map<BlockPos, Character> result = new LinkedHashMap<>();
+        for (Map.Entry<BlockPos, BlockPos> entry : effective.entrySet()) {
+            BlockPos origin = entry.getKey();
+            BlockState initial = initialBlocksSnapshot.get(origin);
+            if (initial != null && isBlacklistedFromDisplacementDisplay(initial)) continue;
+
+            BlockPos finalPos = entry.getValue();
+            int displacement = Math.abs(finalPos.getX() - origin.getX())
+                    + Math.abs(finalPos.getY() - origin.getY())
+                    + Math.abs(finalPos.getZ() - origin.getZ());
+
+            if (displacement == 0) result.put(origin, 'R');
+            else if (displacement == 2) result.put(origin, 'O');
+        }
+        return result;
+    }
+
+    /**
+     * Returns a copy of {@code region} rotated 90° around {@code pivot} (as
+     * seen from above, i.e. around the Y axis) - both the block positions
+     * AND each BlockState's own directional properties (piston/observer
+     * FACING, stair shape, rail shape, etc. via {@code BlockState#rotate})
+     * so the result is a faithful sideways copy of the original structure,
+     * not just relocated blocks still facing their old way. {@code pivot}
+     * itself always maps to itself, so seeding a trigger event at the same
+     * position in both the original and rotated level works unchanged.
+     */
+    public static Map<BlockPos, BlockState> rotateRegion(Map<BlockPos, BlockState> region, BlockPos pivot, Rotation rotation) {
+        Map<BlockPos, BlockState> out = new HashMap<>();
+        for (Map.Entry<BlockPos, BlockState> entry : region.entrySet()) {
+            BlockPos rotatedPos = StructureTemplate.transform(entry.getKey(), Mirror.NONE, rotation, pivot);
+            BlockState rotatedState = entry.getValue().rotate(rotation);
+            out.put(rotatedPos.immutable(), rotatedState);
+        }
+        return out;
+    }
+
     public int getCurrentTick() {
         return currentTick;
     }

@@ -13,6 +13,9 @@ import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.Mirror;
+import net.minecraft.world.level.block.Rotation;
+import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
@@ -21,7 +24,9 @@ import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 
 public class Slimestone implements ModInitializer {
@@ -442,29 +447,20 @@ public class Slimestone implements ModInitializer {
         }
     }
 
-    // ── Simulation ────────────────────────────────────────────────────────────
-    private void runSimulation(ServerPlayer player, BlockPos targetPos) {
-        //player.sendSystemMessage(Component.literal(
-        //        "§a[Slimestone] Starting virtual simulation at " + targetPos.toShortString()));
+    // The tick budget passed to VirtualLevel#simulate for both the real-orientation
+    // run and the rotated comparison run.
+    private static final int SIM_MAX_TICKS = 1000;
 
-        ObserverDebugger.resetExpected();
-        PistonDebugger.resetExpected();
-        MovingBlockDebugger.resetExpected();
-
-        VirtualLevel level = new VirtualLevel(player);
-        lastSimLevel = level;
-
-        for (BlockPos p : computeContraptionRegion(player.level(), targetPos)) {
-            level.setBlockRaw(p, player.level().getBlockState(p));
-        }
-
+    // Seeds the same GT-0 trigger event runSimulation always used to kick off a
+    // run - factored out so both the real level and the throwaway rotated level
+    // start from an identical event. Purely block-type driven (instanceof/.is),
+    // so it's unaffected by whether targetState has been rotated.
+    private static void seedTrigger(VirtualLevel level, BlockPos targetPos) {
         BlockState targetState = level.getBlockState(targetPos);
 
         if (targetState.getBlock() instanceof PistonBaseBlock) {
-            //level.log("Checking initial power for piston at " + targetPos.toShortString());
             level.checkIfExtend(targetPos, targetState);
         } else if (targetState.is(Blocks.OBSERVER)) {
-            //level.log("Observer at " + targetPos.toShortString() + " — simulating artificial update");
             level.scheduleTick(targetPos, Blocks.OBSERVER, 2);
         } else {
             // Note block, trapdoor, or fence gate: pretend its redstone state
@@ -475,13 +471,85 @@ public class Slimestone implements ModInitializer {
             // normal tick loop instead of jumping the queue.
             level.scheduleTick(targetPos, targetState.getBlock(), 0);
         }
+    }
+
+    // ── Simulation ────────────────────────────────────────────────────────────
+    private void runSimulation(ServerPlayer player, BlockPos targetPos) {
+        //player.sendSystemMessage(Component.literal(
+        //        "§a[Slimestone] Starting virtual simulation at " + targetPos.toShortString()));
+
+        // Snapshot the real-world region once - both the real-orientation level
+        // and the rotated comparison level are built from this same data, just
+        // transformed differently for the latter.
+        Map<BlockPos, BlockState> regionSnapshot = new HashMap<>();
+        for (BlockPos p : computeContraptionRegion(player.level(), targetPos)) {
+            regionSnapshot.put(p.immutable(), player.level().getBlockState(p));
+        }
+
+        // ── Silent rotated pass ──────────────────────────────────────────────
+        // Runs the exact same contraption turned 90° (positions AND directional
+        // block properties, e.g. piston/observer FACING - see
+        // VirtualLevel#rotateRegion) around targetPos, purely to compare which
+        // blocks end up net-0 ("didn't move") or net-2 ("moved too much")
+        // against the real-orientation run below. Nothing from this pass is
+        // ever rendered - a rotated position usually isn't even a real block
+        // the player can see - so it must not call render(), and its debugger
+        // side effects (PistonDebugger/ObserverDebugger/MovingBlockDebugger
+        // "expected" logs) are wiped by the resetExpected() calls below before
+        // the real pass runs, so nothing from this rotated pass leaks into
+        // /slimestone compare.
+        Map<BlockPos, BlockState> rotatedRegion = VirtualLevel.rotateRegion(regionSnapshot, targetPos, Rotation.CLOCKWISE_90);
+        VirtualLevel rotatedLevel = new VirtualLevel(player);
+        for (Map.Entry<BlockPos, BlockState> e : rotatedRegion.entrySet()) {
+            rotatedLevel.setBlockRaw(e.getKey(), e.getValue());
+        }
+        seedTrigger(rotatedLevel, targetPos);
+        rotatedLevel.simulate(SIM_MAX_TICKS);
+
+        // Map the rotated run's classification back to real-world coordinates
+        // (rotate 90° the other way around the same pivot) so it can be
+        // compared position-for-position against the real-orientation run.
+        Map<BlockPos, Character> rotatedClassification = new HashMap<>();
+        for (Map.Entry<BlockPos, Character> e : rotatedLevel.getDisplacementClassifications().entrySet()) {
+            BlockPos realPos = StructureTemplate.transform(e.getKey(), Mirror.NONE, Rotation.COUNTERCLOCKWISE_90, targetPos);
+            rotatedClassification.put(realPos.immutable(), e.getValue());
+        }
+
+        // ── Real-orientation pass ────────────────────────────────────────────
+        ObserverDebugger.resetExpected();
+        PistonDebugger.resetExpected();
+        MovingBlockDebugger.resetExpected();
+
+        VirtualLevel level = new VirtualLevel(player);
+        lastSimLevel = level;
+
+        for (Map.Entry<BlockPos, BlockState> e : regionSnapshot.entrySet()) {
+            level.setBlockRaw(e.getKey(), e.getValue());
+        }
+        seedTrigger(level, targetPos);
 
         player.getServer().getCommands().performPrefixedCommand(
                 player.createCommandSourceStack().withSuppressedOutput(),
                 "kill @e[type=minecraft:text_display]"
         );
 
-        level.runTickLoop(1000, poiModeActive);
+        level.simulate(SIM_MAX_TICKS);
+
+        // Any origin where the two orientations disagree (including one side
+        // having no marker at all) gets its display forced white at render
+        // time instead of red/orange - see VirtualLevel#setDirectionalConflicts.
+        Map<BlockPos, Character> realClassification = level.getDisplacementClassifications();
+        Set<BlockPos> directionalConflicts = new HashSet<>();
+        Set<BlockPos> allFlaggedOrigins = new HashSet<>(realClassification.keySet());
+        allFlaggedOrigins.addAll(rotatedClassification.keySet());
+        for (BlockPos origin : allFlaggedOrigins) {
+            if (!java.util.Objects.equals(realClassification.get(origin), rotatedClassification.get(origin))) {
+                directionalConflicts.add(origin);
+            }
+        }
+        level.setDirectionalConflicts(directionalConflicts);
+
+        level.render(poiModeActive);
 
         if (poiModeActive) {
             // A change came in while showing a windowed /poi view - keep
