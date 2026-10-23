@@ -10,14 +10,17 @@ import net.minecraft.commands.arguments.coordinates.BlockPosArgument;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.Mirror;
 import net.minecraft.world.level.block.Rotation;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.material.PushReaction;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
@@ -381,11 +384,15 @@ public class Slimestone implements ModInitializer {
      * Builds the set of positions that make up the contraption at {@code origin},
      * instead of scanning a fixed cube. Starts from a 5x5x5 cube (radius 2)
      * around the origin, always fully included. From there it flood-fills
-     * outward: every non-air block queues up its surrounding 3x3x3 cube, plus
+     * outward: every expandable non-air block queues up its surrounding 3x3x3 cube, plus
      * the six positions exactly 2 blocks away along a single axis (+x/-x,
      * +y/-y, +z/-z). A block that is air is still captured - so a piston has
      * room to push into it - but it's a dead end: the fill does not expand
-     * past it. Only non-air blocks propagate the search further.
+     * past it. Liquids and blocks with the DESTROY piston push reaction are dead ends and are
+     * omitted from the simulation snapshot. Bedrock and blocks in the vanilla
+     * overworld/nether carver-replaceable tags are captured but are also dead
+     * ends. These tags include common terrain and large natural patches such as
+     * sand, sandstone, gravel, granite, diorite, and andesite.
      */
     private static Set<BlockPos> computeContraptionRegion(Level level, BlockPos origin) {
         Set<BlockPos> visited = new HashSet<>();
@@ -405,8 +412,14 @@ public class Slimestone implements ModInitializer {
         while (!queue.isEmpty()) {
             BlockPos p = queue.poll();
 
-            // Air is captured but is not a valid expansion point - stop here.
-            if (level.getBlockState(p).isAir()) {
+            BlockState state = level.getBlockState(p);
+
+            // Air, liquids, DESTROY-reaction blocks, and terrain boundaries are
+            // captured as positions, but do not let the fill spread beyond them.
+            if (state.isAir()
+                    || state.getBlock() instanceof LiquidBlock
+                    || state.getPistonPushReaction() == PushReaction.DESTROY
+                    || isTerrainExpansionBoundary(state)) {
                 continue;
             }
 
@@ -439,6 +452,12 @@ public class Slimestone implements ModInitializer {
         }
 
         return visited;
+    }
+
+    private static boolean isTerrainExpansionBoundary(BlockState state) {
+        return state.is(Blocks.BEDROCK)
+                || state.is(BlockTags.OVERWORLD_CARVER_REPLACEABLES)
+                || state.is(BlockTags.NETHER_CARVER_REPLACEABLES);
     }
 
     public static void onWorldChanged() {
@@ -483,7 +502,11 @@ public class Slimestone implements ModInitializer {
         // transformed differently for the latter.
         Map<BlockPos, BlockState> regionSnapshot = new HashMap<>();
         for (BlockPos p : computeContraptionRegion(player.level(), targetPos)) {
-            regionSnapshot.put(p.immutable(), player.level().getBlockState(p));
+            BlockState state = player.level().getBlockState(p);
+            if (!(state.getBlock() instanceof LiquidBlock)
+                    && state.getPistonPushReaction() != PushReaction.DESTROY) {
+                regionSnapshot.put(p.immutable(), state);
+            }
         }
 
         // ── Silent rotated pass ──────────────────────────────────────────────
