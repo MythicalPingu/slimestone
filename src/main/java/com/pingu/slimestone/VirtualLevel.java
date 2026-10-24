@@ -140,33 +140,28 @@ public class VirtualLevel {
     // A single logged ON/OFF action, with the raw (uncolored) tick+suffix
     // piece - color is decided at spawn time from poweredOn alone (no
     // "only one action" special case, unlike pistons).
-    private static class ObserverActionRecord {
-        final int tick;
-        final String suffix;
-        final boolean poweredOn;
-
-        ObserverActionRecord(int tick, String suffix, boolean poweredOn) {
-            this.tick = tick;
-            this.suffix = suffix;
-            this.poweredOn = poweredOn;
-        }
-    }
+    public record ObserverAction(int tick, String suffix, boolean poweredOn) {}
 
     private static class ObserverDisplayEntry {
-        final List<ObserverActionRecord> actions = new ArrayList<>(); // at most MAX_LOGGED_ACTIONS, chronological order
+        final List<ObserverAction> actions = new ArrayList<>(); // at most MAX_LOGGED_ACTIONS, chronological order
     }
 
     private static class PistonPendingEvent {
         final BlockPos pos;
         final boolean extending;
         final int blockCount;
+        final boolean activated;
 
-        PistonPendingEvent(BlockPos pos, boolean extending, int blockCount) {
+        PistonPendingEvent(BlockPos pos, boolean extending, int blockCount, boolean activated) {
             this.pos = pos;
             this.extending = extending;
             this.blockCount = blockCount;
+            this.activated = activated;
         }
     }
+
+    /** Uncapped record of a successfully processed piston event. */
+    public record PistonActivation(int tick, String suffix, boolean extending, int blockCount, int displayIndex) {}
 
     // A single logged Extend or Retract, with the raw (uncolored) tick+suffix
     // pieces - colors are only decided once we know the total action count.
@@ -175,12 +170,14 @@ public class VirtualLevel {
         final String suffix;
         final boolean extending;
         final int blockCount;
+        final boolean activated;
 
-        PistonActionRecord(int tick, String suffix, boolean extending, int blockCount) {
+        PistonActionRecord(int tick, String suffix, boolean extending, int blockCount, boolean activated) {
             this.tick = tick;
             this.suffix = suffix;
             this.extending = extending;
             this.blockCount = blockCount;
+            this.activated = activated;
         }
     }
 
@@ -205,22 +202,75 @@ public class VirtualLevel {
 
     // Origins (real-world, unrotated coordinates) that a rotation-directionality
     // check has flagged as disagreeing between orientations - i.e. this block
-    // classified as net-0 ("didn't move") or net-2 ("moved too much") in one
-    // orientation but not the other. Empty unless the caller sets it before
-    // render() runs (see runSimulation in Slimestone). When a position is in
+    // was stationary in some orientations and moved in others. Empty unless
+    // the caller sets it before render() runs (see runSimulation in Slimestone).
+    // When a position is in
     // here, pistonObserverDisplacementColor and spawnDisplacementDisplays both
-    // force white (§f) instead of red/orange, since the discrepancy - not the
-    // raw displacement - is the interesting signal.
+    // force orange (§6), since the discrepancy - not the raw displacement -
+    // is the interesting signal.
     private Set<BlockPos> directionalConflicts = Collections.emptySet();
 
+    // Pistons whose successful action sequence differs in at least one
+    // rotated pass. Their ordinary action rows are recolored red.
+    private Set<BlockPos> rotationActivationConflicts = Collections.emptySet();
+    private Map<BlockPos, Set<Integer>> pistonOrderConflicts = Collections.emptyMap();
+    private Set<BlockPos> observerRotationConflicts = Collections.emptySet();
+    private Map<BlockPos, Set<Integer>> observerOrderConflicts = Collections.emptyMap();
+
     /**
-     * Sets the positions whose net-0/net-2 markers should be forced white
-     * instead of red/orange for the upcoming render() call, because a
-     * rotated re-simulation disagreed with this run about their fate. Pass
+     * Sets positions whose displacement markers should be forced orange
+     * instead of red for the upcoming render() call, because a
+     * rotated re-simulation disagreed with this run about their fate. This
+     * also adds a marker when the current orientation moved a block by one
+     * block, which normally has no displacement marker. Pass
      * an empty set (the default) to disable the override entirely.
      */
     public void setDirectionalConflicts(Set<BlockPos> conflicts) {
         this.directionalConflicts = conflicts;
+    }
+
+    public void setRotationActivationConflicts(Set<BlockPos> conflicts) {
+        this.rotationActivationConflicts = conflicts;
+    }
+
+    public void setPistonOrderConflicts(Map<BlockPos, Set<Integer>> conflicts) {
+        this.pistonOrderConflicts = conflicts;
+    }
+
+    public void setObserverRotationConflicts(Set<BlockPos> conflicts) {
+        this.observerRotationConflicts = conflicts;
+    }
+
+    public void setObserverOrderConflicts(Map<BlockPos, Set<Integer>> conflicts) {
+        this.observerOrderConflicts = conflicts;
+    }
+
+    public Map<BlockPos, List<PistonActivation>> getPistonActivations() {
+        Map<BlockPos, List<PistonActivation>> activations = new LinkedHashMap<>();
+        for (Map.Entry<BlockPos, PistonDisplayEntry> entry : pistonPoiDisplayEntries.entrySet()) {
+            List<PistonActivation> pistonActivations = new ArrayList<>();
+            for (int i = 0; i < entry.getValue().actions.size(); i++) {
+                PistonActionRecord action = entry.getValue().actions.get(i);
+                if (action.activated) {
+                    pistonActivations.add(new PistonActivation(action.tick, action.suffix,
+                            action.extending, action.blockCount, i));
+                }
+            }
+            if (!pistonActivations.isEmpty()) activations.put(entry.getKey(), pistonActivations);
+        }
+        return Map.copyOf(activations);
+    }
+
+    public Map<BlockPos, List<ObserverAction>> getObserverActions() {
+        Map<BlockPos, List<ObserverAction>> actions = new LinkedHashMap<>();
+        for (Map.Entry<BlockPos, ObserverDisplayEntry> entry : observerPoiDisplayEntries.entrySet()) {
+            actions.put(entry.getKey(), List.copyOf(entry.getValue().actions));
+        }
+        return Map.copyOf(actions);
+    }
+
+    private boolean hasOrderConflict(Map<BlockPos, Set<Integer>> conflicts, BlockPos pos, int actionIndex) {
+        return conflicts.getOrDefault(pos, Collections.emptySet()).contains(actionIndex);
     }
 
     /**
@@ -264,16 +314,24 @@ public class VirtualLevel {
     }
 
     public void queuePistonDisplay(BlockPos pos, int blockCount, boolean extending) {
+        queuePistonDisplay(pos, blockCount, extending, false);
+    }
+
+    public void queuePistonActivationDisplay(BlockPos pos, int blockCount, boolean extending) {
+        queuePistonDisplay(pos, blockCount, extending, true);
+    }
+
+    private void queuePistonDisplay(BlockPos pos, int blockCount, boolean extending, boolean activated) {
         BlockPos displayPos = getOriginPos(pos).immutable();
 
         // POI: every action is recorded here, uncapped.
-        pendingPistonPoiDisplays.add(new PistonPendingEvent(displayPos, extending, blockCount));
+        pendingPistonPoiDisplays.add(new PistonPendingEvent(displayPos, extending, blockCount, activated));
 
         // Normal display: only the first MAX_LOGGED_ACTIONS actions for this piston are ever logged.
         int count = pistonActionCount.getOrDefault(displayPos, 0);
         if (count >= MAX_LOGGED_ACTIONS) return;
         pistonActionCount.put(displayPos, count + 1);
-        pendingPistonDisplays.add(new PistonPendingEvent(displayPos, extending, blockCount));
+        pendingPistonDisplays.add(new PistonPendingEvent(displayPos, extending, blockCount, activated));
     }
 
     // Records this tick's ON/OFF events into each observer's running
@@ -287,7 +345,7 @@ public class VirtualLevel {
             String suffix = useSuffix ? excelSuffix(i) : "";
 
             ObserverDisplayEntry entry = observerDisplayEntries.computeIfAbsent(e.pos, p -> new ObserverDisplayEntry());
-            entry.actions.add(new ObserverActionRecord(tick, suffix, e.poweredOn));
+            entry.actions.add(new ObserverAction(tick, suffix, e.poweredOn));
         }
         pendingObserverDisplays.clear();
     }
@@ -304,7 +362,7 @@ public class VirtualLevel {
             String suffix = useSuffix ? excelSuffix(i) : "";
 
             ObserverDisplayEntry entry = observerPoiDisplayEntries.computeIfAbsent(e.pos, p -> new ObserverDisplayEntry());
-            entry.actions.add(new ObserverActionRecord(tick, suffix, e.poweredOn));
+            entry.actions.add(new ObserverAction(tick, suffix, e.poweredOn));
         }
         pendingObserverPoiDisplays.clear();
     }
@@ -316,7 +374,8 @@ public class VirtualLevel {
     // once we know exactly which actions land in the queried window - see
     // spawnPointOfInterest for where that's rendered (using the actual
     // simulation GT, not one relative to centerGt).
-    private record PoiEntry(BlockPos pos, int tick, String suffix, boolean isPiston, boolean stateOn, int blockCount) {}
+    private record PoiEntry(BlockPos pos, int tick, String suffix, boolean isPiston, boolean stateOn,
+                            int blockCount, boolean orderConflict) {}
 
     // Every action from the most recent simulation run, in chronological order.
     private final List<PoiEntry> poiEntries = new ArrayList<>();
@@ -348,16 +407,23 @@ public class VirtualLevel {
     // (see the fullDisplayText skip in spawnDisplacementDisplays).
     private void spawnObserverDisplays(boolean poiMode) {
         for (Map.Entry<BlockPos, ObserverDisplayEntry> mapEntry : observerDisplayEntries.entrySet()) {
-            List<ObserverActionRecord> actions = mapEntry.getValue().actions;
+            List<ObserverAction> actions = mapEntry.getValue().actions;
             if (actions.isEmpty()) continue;
 
-            String override = pistonObserverDisplacementColor(mapEntry.getKey());
+            boolean rotationConflict = observerRotationConflicts.contains(mapEntry.getKey());
+            String displacementOverride = pistonObserverDisplacementColor(mapEntry.getKey());
 
             StringBuilder line = new StringBuilder();
             for (int i = 0; i < actions.size(); i++) {
-                ObserverActionRecord a = actions.get(i);
-                String color = override != null ? override : (a.poweredOn ? "§b" : "§d");
-                String piece = color + a.tick + a.suffix;
+                ObserverAction a = actions.get(i);
+                boolean orderConflict = hasOrderConflict(observerOrderConflicts, mapEntry.getKey(), i)
+                        && !rotationConflict && displacementOverride == null;
+                String color = rotationConflict ? "§c"
+                        : (orderConflict ? (a.poweredOn ? "§b" : "§d")
+                        : (displacementOverride != null ? displacementOverride : (a.poweredOn ? "§b" : "§d")));
+                String piece = orderConflict && !rotationConflict
+                        ? color + a.tick + (a.suffix.isEmpty() ? "" : "§6" + a.suffix)
+                        : color + a.tick + a.suffix;
                 if (i > 0) line.append(" ");
                 line.append(piece);
             }
@@ -398,16 +464,14 @@ public class VirtualLevel {
      * previously never appeared to show red at all: any marker for them
      * would have silently overlapped their own Extend/Retract or ON/OFF row.
      *
-     * @return "§c" (red) if this position ended the run at net displacement 0
-     *         from where it started (including never having moved a single
-     *         time), "§6" (orange) if it ended up a net two blocks away, or
-     *         null if displacement is 1/3+, the position wasn't part of the
-     *         pre-run snapshot, or it's blacklisted from the marker system.
+     * @return "§6" (orange) if this position moved differently across
+     *         rotations, "§c" (red) if it never moved, or null otherwise.
      */
     private String pistonObserverDisplacementColor(BlockPos origin) {
         BlockState initialState = initialBlocksSnapshot.get(origin);
         if (initialState == null || initialState.isAir()) return null;
         if (isBlacklistedFromDisplacementDisplay(initialState)) return null;
+        if (directionalConflicts.contains(origin)) return "§6";
 
         BlockPos finalPos;
         if (displacedOriginToFinalPos.containsKey(origin)) {
@@ -424,9 +488,8 @@ public class VirtualLevel {
                 + Math.abs(finalPos.getY() - origin.getY())
                 + Math.abs(finalPos.getZ() - origin.getZ());
 
-        if (displacement == 0) return directionalConflicts.contains(origin) ? "§f" : "§c";
-        if (displacement == 2) return directionalConflicts.contains(origin) ? "§f" : "§6";
-        return null; // net displacement of 1 (or 3+) gets no marker
+        if (displacement == 0) return "§c";
+        return null;
     }
 
     // Spawns a small "." marker over every block that either PistonMechanics
@@ -437,9 +500,8 @@ public class VirtualLevel {
     //                    this includes blocks that never moved a single
     //                    time, e.g. something the user forgot to attach to
     //                    a moving structure.
-    //   - nothing at all if it ended up a net one block away.
-    //   - §6 orange "." if it ended up a net two blocks away.
-    //   - nothing at all for anything past two blocks - no marker defined.
+    //   - §6 orange "█" if its result differs across rotations.
+    //   - nothing for blocks that moved the same way in every orientation.
     //   - nothing at all if the block's type is in DISPLACEMENT_DISPLAY_BLACKLIST
     //                    above, regardless of displacement.
     // Pistons and observers ARE included here (for the ones that never logged
@@ -497,15 +559,12 @@ public class VirtualLevel {
                     + Math.abs(finalPos.getZ() - origin.getZ());
 
             String text;
-            if (displacement == 0) {
-                // red - ended back at home (or never moved at all) - unless a
-                // rotation-directionality check flagged this origin, in which
-                // case white takes over regardless of the raw displacement.
-                text = directionalConflicts.contains(origin) ? "§f█" : "§c█";
-            } else if (displacement == 2) {
-                text = directionalConflicts.contains(origin) ? "§f█" : "§6█"; // orange - ended two blocks out
+            if (directionalConflicts.contains(origin)) {
+                text = "§6█";
+            } else if (displacement == 0) {
+                text = "§c█";
             } else {
-                continue; // net displacement of 1 (or 3+) gets no marker
+                continue; // consistent movement in every checked orientation
             }
 
             displacementDisplayText.put(origin, text);
@@ -602,7 +661,7 @@ public class VirtualLevel {
             String suffix = useSuffix ? excelSuffix(i) : "";
 
             PistonDisplayEntry entry = pistonDisplayEntries.computeIfAbsent(e.pos, p -> new PistonDisplayEntry());
-            entry.actions.add(new PistonActionRecord(tick, suffix, e.extending, e.blockCount));
+            entry.actions.add(new PistonActionRecord(tick, suffix, e.extending, e.blockCount, e.activated));
         }
         pendingPistonDisplays.clear();
     }
@@ -619,7 +678,7 @@ public class VirtualLevel {
             String suffix = useSuffix ? excelSuffix(i) : "";
 
             PistonDisplayEntry entry = pistonPoiDisplayEntries.computeIfAbsent(e.pos, p -> new PistonDisplayEntry());
-            entry.actions.add(new PistonActionRecord(tick, suffix, e.extending, e.blockCount));
+            entry.actions.add(new PistonActionRecord(tick, suffix, e.extending, e.blockCount, e.activated));
         }
         pendingPistonPoiDisplays.clear();
     }
@@ -639,16 +698,24 @@ public class VirtualLevel {
             List<PistonActionRecord> actions = mapEntry.getValue().actions;
             if (actions.isEmpty()) continue;
 
-            String override = pistonObserverDisplacementColor(mapEntry.getKey());
+            boolean rotationConflict = rotationActivationConflicts.contains(mapEntry.getKey());
+            String displacementOverride = pistonObserverDisplacementColor(mapEntry.getKey());
 
             String[] topPieces = new String[actions.size()];
             String[] bottomPieces = new String[actions.size()];
+            Set<Integer> orderConflicts = pistonOrderConflicts.getOrDefault(mapEntry.getKey(), Collections.emptySet());
 
             StringBuilder firstLine = new StringBuilder();
             for (int i = 0; i < actions.size(); i++) {
                 PistonActionRecord a = actions.get(i);
-                String color = override != null ? override : (actions.size() == 1 ? "§6" : (a.extending ? "§e" : "§a"));
-                topPieces[i] = color + a.tick + a.suffix;
+                boolean orderConflict = orderConflicts.contains(i) && !rotationConflict && displacementOverride == null;
+                String actionColor = actions.size() == 1 ? "§6" : (a.extending ? "§e" : "§a");
+                String color = rotationConflict ? "§c"
+                        : (orderConflict ? actionColor
+                        : (displacementOverride != null ? displacementOverride : actionColor));
+                topPieces[i] = orderConflict
+                        ? color + a.tick + (a.suffix.isEmpty() ? "" : "§6" + a.suffix)
+                        : color + a.tick + a.suffix;
                 if (i > 0) firstLine.append(" ");
                 firstLine.append(topPieces[i]);
             }
@@ -657,7 +724,11 @@ public class VirtualLevel {
             StringBuilder secondLine = new StringBuilder();
             for (int i = 0; i < actions.size(); i++) {
                 PistonActionRecord a = actions.get(i);
-                String bottomColor = override != null ? override : (actions.size() == 1 ? "§6" : (a.extending ? "§e" : "§a"));
+                boolean orderConflict = orderConflicts.contains(i) && !rotationConflict && displacementOverride == null;
+                String actionColor = actions.size() == 1 ? "§6" : (a.extending ? "§e" : "§a");
+                String bottomColor = rotationConflict ? "§c"
+                        : (orderConflict ? actionColor
+                        : (displacementOverride != null ? displacementOverride : actionColor));
                 if (!a.extending && !sticky) {
                     // A normal piston's retract never pulls anything, so
                     // there's no push-limit number to show - just mark the row.
@@ -665,7 +736,8 @@ public class VirtualLevel {
                 } else if (a.blockCount != NO_COUNT) {
                     // Sticky-piston retracts pull blocks the same way extends
                     // push them, so show the pull count exactly like a push count.
-                    String countColor = override != null ? override : (a.blockCount > SimPistonResolver.MAX_PUSH ? "§c" : bottomColor);
+                    String countColor = rotationConflict ? "§c"
+                            : (a.blockCount > SimPistonResolver.MAX_PUSH && !orderConflict ? "§c" : bottomColor);
                     bottomPieces[i] = countColor + a.blockCount;
                 } else {
                     continue; // nothing meaningful to show for this action
@@ -695,15 +767,19 @@ public class VirtualLevel {
     // centerGt - see spawnPointOfInterest.
     private void buildPoiEntries() {
         for (Map.Entry<BlockPos, ObserverDisplayEntry> mapEntry : observerPoiDisplayEntries.entrySet()) {
-            for (ObserverActionRecord a : mapEntry.getValue().actions) {
-                poiEntries.add(new PoiEntry(mapEntry.getKey(), a.tick, a.suffix, false, a.poweredOn, NO_COUNT));
+            for (int i = 0; i < mapEntry.getValue().actions.size(); i++) {
+                ObserverAction a = mapEntry.getValue().actions.get(i);
+                boolean orderConflict = hasOrderConflict(observerOrderConflicts, mapEntry.getKey(), i);
+                poiEntries.add(new PoiEntry(mapEntry.getKey(), a.tick, a.suffix, false, a.poweredOn, NO_COUNT, orderConflict));
             }
         }
         observerPoiDisplayEntries.clear();
 
         for (Map.Entry<BlockPos, PistonDisplayEntry> mapEntry : pistonPoiDisplayEntries.entrySet()) {
-            for (PistonActionRecord a : mapEntry.getValue().actions) {
-                poiEntries.add(new PoiEntry(mapEntry.getKey(), a.tick, a.suffix, true, a.extending, a.blockCount));
+            for (int i = 0; i < mapEntry.getValue().actions.size(); i++) {
+                PistonActionRecord a = mapEntry.getValue().actions.get(i);
+                boolean orderConflict = hasOrderConflict(pistonOrderConflicts, mapEntry.getKey(), i);
+                poiEntries.add(new PoiEntry(mapEntry.getKey(), a.tick, a.suffix, true, a.extending, a.blockCount, orderConflict));
             }
         }
         pistonPoiDisplayEntries.clear();
@@ -743,8 +819,11 @@ public class VirtualLevel {
                 String topPiece;
                 String bottomPiece = null;
                 if (e.isPiston()) {
-                    String color = e.stateOn() ? "§e" : "§a"; // extend / retract
-                    topPiece = color + gt + e.suffix();
+                    boolean rotationConflict = rotationActivationConflicts.contains(e.pos());
+                    String color = rotationConflict ? "§c" : (e.stateOn() ? "§e" : "§a"); // extend / retract
+                    topPiece = e.orderConflict() && !rotationConflict
+                            ? color + gt + (e.suffix().isEmpty() ? "" : "§6" + e.suffix())
+                            : color + gt + e.suffix();
                     if (!e.stateOn() && !isStickyPistonAt(e.pos())) {
                         // A normal piston's retract never pulls anything, so
                         // there's no push-limit number to show - just mark the row.
@@ -752,12 +831,18 @@ public class VirtualLevel {
                     } else if (e.blockCount() != NO_COUNT) {
                         // Sticky-piston retracts pull blocks the same way
                         // extends push them - show the pull count like a push count.
-                        String countColor = e.blockCount() > SimPistonResolver.MAX_PUSH ? "§c" : color;
+                        String countColor = rotationConflict || (!e.orderConflict() && e.blockCount() > SimPistonResolver.MAX_PUSH)
+                                ? "§c"
+                                : color;
                         bottomPiece = countColor + e.blockCount();
                     }
                 } else {
-                    String color = e.stateOn() ? "§b" : "§d"; // ON / OFF
-                    topPiece = color + gt + e.suffix();
+                    String color = observerRotationConflicts.contains(e.pos())
+                            ? "§c"
+                            : (e.stateOn() ? "§b" : "§d"); // ON / OFF
+                    topPiece = e.orderConflict()
+                            ? color + gt + (e.suffix().isEmpty() ? "" : "§6" + e.suffix())
+                            : color + gt + e.suffix();
                 }
 
                 if (top.length() > 0) top.append(" ");
@@ -961,7 +1046,7 @@ public class VirtualLevel {
     /**
      * Runs the tick simulation only - no text_display entities are spawned
      * and nothing in the real world is touched. Populates everything
-     * {@link #getDisplacementClassifications()} and {@link #render} need
+     * {@link #getMovementClassifications()} and {@link #render} need
      * (initialBlocksSnapshot, displacedOriginToFinalPos, the piston/observer
      * display-entry maps). Safe to call on a throwaway VirtualLevel (e.g. a
      * rotated copy used purely to compare against another run) whose results
@@ -1031,7 +1116,7 @@ public class VirtualLevel {
      * Renders the results of the most recent {@link #simulate} call into the
      * real world as text_display entities. Split out from simulate() so a
      * caller can inspect/compare simulation results (e.g. via
-     * {@link #getDisplacementClassifications()}) before deciding what, if
+     * {@link #getMovementClassifications()}) before deciding what, if
      * anything, should actually be drawn - see setDirectionalConflicts.
      */
     public void render(boolean poiMode) {
@@ -1041,27 +1126,22 @@ public class VirtualLevel {
         spawnObserverDisplays(poiMode);
         // ...and build the uncapped POI action list from the parallel feed.
         buildPoiEntries();
-        // ...and a "." marker for every other block that ended the run net-0
-        // or net-2 away from where it started - but never while in poi mode,
-        // which doesn't use the displacement display system at all.
+        // ...and a marker for stationary blocks and blocks whose movement
+        // changes by orientation - but never while in poi mode, which doesn't
+        // use the displacement display system at all.
         if (!poiMode) {
             spawnDisplacementDisplays(initialBlocksSnapshot);
         }
     }
 
     /**
-     * Pure, read-only classification of every tracked origin as it stood at
-     * the end of the most recent {@link #simulate} call: {@code 'R'} for net
-     * displacement 0 ("didn't move" - including never touched at all),
-     * {@code 'O'} for net displacement 2 ("moved too much"), and no entry at
-     * all for net 1/3+ or anything blacklisted. Mirrors exactly the
-     * red/orange logic spawnDisplacementDisplays and
-     * pistonObserverDisplacementColor use, but as data instead of a side
-     * effect - safe to call on a throwaway level that will never be
-     * rendered. Ignores directionalConflicts entirely (that override only
-     * applies at render time).
+     * Pure, read-only classification of each tracked origin as stationary
+     * ({@code 'R'}) or moved ({@code 'M'}) at the end of the most recent
+     * {@link #simulate} call. Blocks that were destroyed or blacklisted are
+     * omitted. Safe to call on a throwaway rotated level that is never
+     * rendered. Ignores directionalConflicts, which is compared separately.
      */
-    public Map<BlockPos, Character> getDisplacementClassifications() {
+    public Map<BlockPos, Character> getMovementClassifications() {
         // Same backfill as spawnDisplacementDisplays: anything PistonMechanics
         // never recorded a displacement for, but that's still sitting exactly
         // where it started, counts as net-0.
@@ -1089,8 +1169,7 @@ public class VirtualLevel {
                     + Math.abs(finalPos.getY() - origin.getY())
                     + Math.abs(finalPos.getZ() - origin.getZ());
 
-            if (displacement == 0) result.put(origin, 'R');
-            else if (displacement == 2) result.put(origin, 'O');
+            result.put(origin, displacement == 0 ? 'R' : 'M');
         }
         return result;
     }

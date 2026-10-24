@@ -190,7 +190,7 @@ public class PistonMechanics {
             // --- SLIMESTONE DISPLAY LOGIC ---
             int pushCount = resolver.toPush.size();
 
-            level.queuePistonDisplay(pos, pushCount, true);
+            level.queuePistonActivationDisplay(pos, pushCount, true);
             // --------------------------------
 
             PistonDebugger.logExpected(pos, true, level.getCurrentTick());
@@ -253,7 +253,7 @@ public class PistonMechanics {
                     // pushed block rather than resolving a fresh pull - no new
                     // blocks were pulled, but the retraction itself still happened
                     // and must be logged.
-                    level.queuePistonDisplay(pos, 0, false);
+                    level.queuePistonActivationDisplay(pos, 0, false);
                 }
 
                 if (!instantFinished) {
@@ -269,7 +269,7 @@ public class PistonMechanics {
 
                         // --- SLIMESTONE DISPLAY LOGIC ---
                         // Pulled nothing (0 blocks)
-                        level.queuePistonDisplay(pos, 0, false);
+                        level.queuePistonActivationDisplay(pos, 0, false);
                     } else {
                         BlockState headStateBeforeResolve = level.getBlockState(headPos);
                         if (headStateBeforeResolve.is(Blocks.PISTON_HEAD)) {
@@ -282,7 +282,7 @@ public class PistonMechanics {
                         if (resolver.resolve()) {
                             // --- SLIMESTONE DISPLAY LOGIC ---
                             // Successfully resolved a pull
-                            level.queuePistonDisplay(pos, resolver.toPush.size(), false);
+                            level.queuePistonActivationDisplay(pos, resolver.toPush.size(), false);
 
                             moveBlocks(pos, currentState, facing, false, resolver);
                         } else {
@@ -294,9 +294,9 @@ public class PistonMechanics {
                             // many blocks it tried to grab). Any other failure (blocked by
                             // an immovable block, etc.) pulled nothing, so show 0 as before.
                             if (resolver.isPushLimitExceeded()) {
-                                level.queuePistonDisplay(pos, resolver.toPush.size(), false);
+                                level.queuePistonActivationDisplay(pos, resolver.toPush.size(), false);
                             } else {
-                                level.queuePistonDisplay(pos, 0, false);
+                                level.queuePistonActivationDisplay(pos, 0, false);
                             }
                         }
                     }
@@ -307,7 +307,7 @@ public class PistonMechanics {
 
                 // --- SLIMESTONE DISPLAY LOGIC ---
                 // Normal pistons never pull anything on retract - no count to show
-                level.queuePistonDisplay(pos, VirtualLevel.NO_COUNT, false);
+                level.queuePistonActivationDisplay(pos, VirtualLevel.NO_COUNT, false);
             }
         }
     }

@@ -1,5 +1,6 @@
 package com.pingu.slimestone;
 
+import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -26,9 +27,11 @@ import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -44,6 +47,10 @@ public class Slimestone implements ModInitializer {
     // re-simulation is deferred until the real world stops doing anything
     // that would still change on its own - checked once per tick below.
     private static boolean pendingSimRun = false;
+
+    // When enabled, the simulation compares its results against 90/180/270-
+    // degree rotated copies. Disable this to skip all rotated runs and markers.
+    private static boolean rotationCheckEnabled = true;
 
     // The VirtualLevel from the most recently completed simulation run, kept
     // around so /slimestone poi <gt> can look up its recorded actions.
@@ -210,6 +217,32 @@ public class Slimestone implements ModInitializer {
                                             pendingSimRun = true;
                                         }
                                         return limit;
+                                    })
+                            )
+                    )
+
+                    // /slimestone rotationcheck -> show whether rotation checking is enabled.
+                    // /slimestone rotationcheck <true|false> -> toggle all rotated checks.
+                    .then(Commands.literal("rotationcheck")
+                            .executes(context -> {
+                                ServerPlayer player = context.getSource().getPlayerOrException();
+                                player.sendSystemMessage(Component.literal(
+                                        "§a[Slimestone] Rotation check: §f"
+                                                + (rotationCheckEnabled ? "ON" : "OFF")));
+                                return 1;
+                            })
+                            .then(Commands.argument("enabled", BoolArgumentType.bool())
+                                    .executes(context -> {
+                                        ServerPlayer player = context.getSource().getPlayerOrException();
+                                        rotationCheckEnabled = BoolArgumentType.getBool(context, "enabled");
+                                        player.sendSystemMessage(Component.literal(
+                                                "§a[Slimestone] Rotation check: §f"
+                                                        + (rotationCheckEnabled ? "ON" : "OFF")));
+
+                                        if (trackingEnabled && trackedOrigin != null) {
+                                            pendingSimRun = true;
+                                        }
+                                        return 1;
                                     })
                             )
                     )
@@ -513,29 +546,41 @@ public class Slimestone implements ModInitializer {
         // Runs the exact same contraption turned 90° (positions AND directional
         // block properties, e.g. piston/observer FACING - see
         // VirtualLevel#rotateRegion) around targetPos, purely to compare which
-        // blocks end up net-0 ("didn't move") or net-2 ("moved too much")
-        // against the real-orientation run below. Nothing from this pass is
+        // blocks move and which remain stationary against the real-orientation
+        // run below. Nothing from the rotated passes is
         // ever rendered - a rotated position usually isn't even a real block
         // the player can see - so it must not call render(), and its debugger
         // side effects (PistonDebugger/ObserverDebugger/MovingBlockDebugger
         // "expected" logs) are wiped by the resetExpected() calls below before
         // the real pass runs, so nothing from this rotated pass leaks into
         // /slimestone compare.
-        Map<BlockPos, BlockState> rotatedRegion = VirtualLevel.rotateRegion(regionSnapshot, targetPos, Rotation.CLOCKWISE_90);
-        VirtualLevel rotatedLevel = new VirtualLevel(player);
-        for (Map.Entry<BlockPos, BlockState> e : rotatedRegion.entrySet()) {
-            rotatedLevel.setBlockRaw(e.getKey(), e.getValue());
-        }
-        seedTrigger(rotatedLevel, targetPos);
-        rotatedLevel.simulate(SIM_MAX_TICKS);
+        VirtualLevel rotatedLevel = rotationCheckEnabled
+                ? simulateRotatedRegion(player, regionSnapshot, targetPos, Rotation.CLOCKWISE_90)
+                : null;
 
-        // Map the rotated run's classification back to real-world coordinates
-        // (rotate 90° the other way around the same pivot) so it can be
-        // compared position-for-position against the real-orientation run.
-        Map<BlockPos, Character> rotatedClassification = new HashMap<>();
-        for (Map.Entry<BlockPos, Character> e : rotatedLevel.getDisplacementClassifications().entrySet()) {
-            BlockPos realPos = StructureTemplate.transform(e.getKey(), Mirror.NONE, Rotation.COUNTERCLOCKWISE_90, targetPos);
-            rotatedClassification.put(realPos.immutable(), e.getValue());
+        List<Map<BlockPos, Character>> rotatedClassifications = new ArrayList<>();
+        List<Map<BlockPos, List<VirtualLevel.PistonActivation>>> rotatedPistonActivations = new ArrayList<>();
+        List<Map<BlockPos, List<VirtualLevel.ObserverAction>>> rotatedObserverActions = new ArrayList<>();
+        if (rotationCheckEnabled) {
+            rotatedClassifications.add(mapRotatedClassificationsToOriginal(
+                    rotatedLevel.getMovementClassifications(), targetPos, Rotation.CLOCKWISE_90));
+            rotatedPistonActivations.add(mapRotatedPistonsToOriginal(
+                    rotatedLevel.getPistonActivations(), targetPos, Rotation.CLOCKWISE_90));
+            rotatedObserverActions.add(mapRotatedPistonsToOriginal(
+                    rotatedLevel.getObserverActions(), targetPos, Rotation.CLOCKWISE_90));
+
+            // Reuse the existing 90-degree pass and run the other orientations
+            // only while rotation checking is enabled.
+            for (Rotation rotation : List.of(Rotation.CLOCKWISE_180, Rotation.COUNTERCLOCKWISE_90)) {
+                VirtualLevel otherRotatedLevel = simulateRotatedRegion(
+                        player, regionSnapshot, targetPos, rotation);
+                rotatedClassifications.add(mapRotatedClassificationsToOriginal(
+                        otherRotatedLevel.getMovementClassifications(), targetPos, rotation));
+                rotatedPistonActivations.add(mapRotatedPistonsToOriginal(
+                        otherRotatedLevel.getPistonActivations(), targetPos, rotation));
+                rotatedObserverActions.add(mapRotatedPistonsToOriginal(
+                        otherRotatedLevel.getObserverActions(), targetPos, rotation));
+            }
         }
 
         // ── Real-orientation pass ────────────────────────────────────────────
@@ -558,16 +603,90 @@ public class Slimestone implements ModInitializer {
 
         level.simulate(SIM_MAX_TICKS);
 
-        // Any origin where the two orientations disagree (including one side
-        // having no marker at all) gets its display forced white at render
-        // time instead of red/orange - see VirtualLevel#setDirectionalConflicts.
-        Map<BlockPos, Character> realClassification = level.getDisplacementClassifications();
+        Set<BlockPos> rotationActivationConflicts = new HashSet<>();
+        Map<BlockPos, Set<Integer>> pistonOrderConflicts = new HashMap<>();
+        Set<BlockPos> observerRotationConflicts = new HashSet<>();
+        Map<BlockPos, Set<Integer>> observerOrderConflicts = new HashMap<>();
+        if (rotationCheckEnabled) {
+            Map<BlockPos, List<VirtualLevel.PistonActivation>> originalActivations = level.getPistonActivations();
+            for (Map.Entry<BlockPos, List<VirtualLevel.PistonActivation>> piston : originalActivations.entrySet()) {
+                boolean fullConflict = false;
+                for (Map<BlockPos, List<VirtualLevel.PistonActivation>> rotatedActivations : rotatedPistonActivations) {
+                    List<VirtualLevel.PistonActivation> rotated = rotatedActivations.get(piston.getKey());
+                    if (rotated == null || rotated.size() != piston.getValue().size()) {
+                        fullConflict = true;
+                        break;
+                    }
+                    for (int i = 0; i < rotated.size(); i++) {
+                        VirtualLevel.PistonActivation originalAction = piston.getValue().get(i);
+                        VirtualLevel.PistonActivation rotatedAction = rotated.get(i);
+                        if (originalAction.tick() != rotatedAction.tick()
+                                || originalAction.extending() != rotatedAction.extending()
+                                || originalAction.blockCount() != rotatedAction.blockCount()) {
+                            fullConflict = true;
+                            break;
+                        }
+                        if (!originalAction.suffix().equals(rotatedAction.suffix())) {
+                            pistonOrderConflicts.computeIfAbsent(piston.getKey(), p -> new HashSet<>())
+                                    .add(originalAction.displayIndex());
+                        }
+                    }
+                    if (fullConflict) break;
+                }
+                if (fullConflict) {
+                    rotationActivationConflicts.add(piston.getKey());
+                    pistonOrderConflicts.remove(piston.getKey());
+                }
+            }
+
+            Map<BlockPos, List<VirtualLevel.ObserverAction>> originalObserverActions = level.getObserverActions();
+            for (Map.Entry<BlockPos, List<VirtualLevel.ObserverAction>> observer : originalObserverActions.entrySet()) {
+                boolean fullConflict = false;
+                for (Map<BlockPos, List<VirtualLevel.ObserverAction>> rotatedActions : rotatedObserverActions) {
+                    List<VirtualLevel.ObserverAction> rotated = rotatedActions.get(observer.getKey());
+                    if (rotated == null || rotated.size() != observer.getValue().size()) {
+                        fullConflict = true;
+                        break;
+                    }
+                    for (int i = 0; i < rotated.size(); i++) {
+                        VirtualLevel.ObserverAction originalAction = observer.getValue().get(i);
+                        VirtualLevel.ObserverAction rotatedAction = rotated.get(i);
+                        if (originalAction.tick() != rotatedAction.tick()
+                                || originalAction.poweredOn() != rotatedAction.poweredOn()) {
+                            fullConflict = true;
+                            break;
+                        }
+                        if (!originalAction.suffix().equals(rotatedAction.suffix())) {
+                            observerOrderConflicts.computeIfAbsent(observer.getKey(), p -> new HashSet<>()).add(i);
+                        }
+                    }
+                    if (fullConflict) break;
+                }
+                if (fullConflict) {
+                    observerRotationConflicts.add(observer.getKey());
+                    observerOrderConflicts.remove(observer.getKey());
+                }
+            }
+        }
+        level.setRotationActivationConflicts(rotationActivationConflicts);
+        level.setPistonOrderConflicts(pistonOrderConflicts);
+        level.setObserverRotationConflicts(observerRotationConflicts);
+        level.setObserverOrderConflicts(observerOrderConflicts);
+
+        // Any origin whose stationary/moving classification differs in one or
+        // more rotated runs gets an orange marker; all rotations are checked.
+        Map<BlockPos, Character> realClassification = level.getMovementClassifications();
         Set<BlockPos> directionalConflicts = new HashSet<>();
         Set<BlockPos> allFlaggedOrigins = new HashSet<>(realClassification.keySet());
-        allFlaggedOrigins.addAll(rotatedClassification.keySet());
+        for (Map<BlockPos, Character> rotatedClassification : rotatedClassifications) {
+            allFlaggedOrigins.addAll(rotatedClassification.keySet());
+        }
         for (BlockPos origin : allFlaggedOrigins) {
-            if (!java.util.Objects.equals(realClassification.get(origin), rotatedClassification.get(origin))) {
-                directionalConflicts.add(origin);
+            for (Map<BlockPos, Character> rotatedClassification : rotatedClassifications) {
+                if (!java.util.Objects.equals(realClassification.get(origin), rotatedClassification.get(origin))) {
+                    directionalConflicts.add(origin);
+                    break;
+                }
             }
         }
         level.setDirectionalConflicts(directionalConflicts);
@@ -639,6 +758,63 @@ public class Slimestone implements ModInitializer {
         //player.sendSystemMessage(Component.literal(
         //        "§a[Slimestone] Ready — run your machine! (auto-compare after §f"
         //                + ObserverDebugger.RECORD_GT + "§a GT, or type §f/slimestone compare§a)"));
+    }
+
+    private static VirtualLevel simulateRotatedRegion(
+            ServerPlayer player,
+            Map<BlockPos, BlockState> regionSnapshot,
+            BlockPos pivot,
+            Rotation rotation
+    ) {
+        Map<BlockPos, BlockState> rotatedRegion = VirtualLevel.rotateRegion(regionSnapshot, pivot, rotation);
+        VirtualLevel rotatedLevel = new VirtualLevel(player);
+        for (Map.Entry<BlockPos, BlockState> entry : rotatedRegion.entrySet()) {
+            rotatedLevel.setBlockRaw(entry.getKey(), entry.getValue());
+        }
+        seedTrigger(rotatedLevel, pivot);
+        rotatedLevel.simulate(SIM_MAX_TICKS);
+        return rotatedLevel;
+    }
+
+    private static Map<BlockPos, Character> mapRotatedClassificationsToOriginal(
+            Map<BlockPos, Character> rotatedClassifications,
+            BlockPos pivot,
+            Rotation rotation
+    ) {
+        Rotation inverse = switch (rotation) {
+            case CLOCKWISE_90 -> Rotation.COUNTERCLOCKWISE_90;
+            case CLOCKWISE_180 -> Rotation.CLOCKWISE_180;
+            case COUNTERCLOCKWISE_90 -> Rotation.CLOCKWISE_90;
+            default -> Rotation.NONE;
+        };
+
+        Map<BlockPos, Character> originalPositions = new HashMap<>();
+        for (Map.Entry<BlockPos, Character> entry : rotatedClassifications.entrySet()) {
+            BlockPos originalPos = StructureTemplate.transform(entry.getKey(), Mirror.NONE, inverse, pivot);
+            originalPositions.put(originalPos.immutable(), entry.getValue());
+        }
+        return originalPositions;
+    }
+
+    private static <T> Map<BlockPos, List<T>> mapRotatedPistonsToOriginal(
+            Map<BlockPos, List<T>> rotatedPistons,
+            BlockPos pivot,
+            Rotation rotation
+    ) {
+        Rotation inverse = switch (rotation) {
+            case CLOCKWISE_90 -> Rotation.COUNTERCLOCKWISE_90;
+            case CLOCKWISE_180 -> Rotation.CLOCKWISE_180;
+            case COUNTERCLOCKWISE_90 -> Rotation.CLOCKWISE_90;
+            default -> Rotation.NONE;
+        };
+
+        Map<BlockPos, List<T>> originalPositions = new HashMap<>();
+        for (Map.Entry<BlockPos, List<T>> entry : rotatedPistons.entrySet()) {
+            BlockPos rotatedPos = entry.getKey();
+            BlockPos originalPos = StructureTemplate.transform(rotatedPos, Mirror.NONE, inverse, pivot);
+            originalPositions.put(originalPos.immutable(), entry.getValue());
+        }
+        return originalPositions;
     }
 
     private BlockPos getTargetBlock(ServerPlayer player) {
