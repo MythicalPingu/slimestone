@@ -1,6 +1,5 @@
 package com.pingu.slimestone;
 
-import com.mojang.brigadier.arguments.BoolArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -15,9 +14,12 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.world.level.ClipContext;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.FenceGateBlock;
 import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.Mirror;
 import net.minecraft.world.level.block.Rotation;
+import net.minecraft.world.level.block.TrapDoorBlock;
 import net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplate;
 import net.minecraft.world.level.block.piston.PistonBaseBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -48,9 +50,10 @@ public class Slimestone implements ModInitializer {
     // that would still change on its own - checked once per tick below.
     private static boolean pendingSimRun = false;
 
-    // When enabled, the simulation compares its results against 90/180/270-
-    // degree rotated copies. Disable this to skip all rotated runs and markers.
-    private static boolean rotationCheckEnabled = true;
+    private enum RotationCheckMode { OFF, ALL, HALF_TURN }
+
+    // ALL compares 90/180/270-degree copies; HALF_TURN compares only 180°.
+    private static RotationCheckMode rotationCheckMode = RotationCheckMode.ALL;
 
     // The VirtualLevel from the most recently completed simulation run, kept
     // around so /slimestone poi <gt> can look up its recorded actions.
@@ -102,19 +105,27 @@ public class Slimestone implements ModInitializer {
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
             dispatcher.register(Commands.literal("slimestone")
 
-                    // /slimestone  -> toggle current session on/off
+                    // /slimestone -> start at the looked-at block, retarget to
+                    // another redstone component, or stop on a non-redstone block.
                     .executes(context -> {
                         ServerPlayer player = context.getSource().getPlayerOrException();
 
                         if (trackingEnabled) {
-                            stopTracking(player);
+                            BlockPos target = getTargetBlock(player);
+                            if (target != null
+                                    && !target.equals(trackedOrigin)
+                                    && isRedstoneComponent(player.level().getBlockState(target))) {
+                                startTracking(player, target);
+                            } else {
+                                stopTracking(player);
+                            }
                             return 1;
                         }
 
                         BlockPos target = getTargetBlock(player);
                         if (target == null) {
                             context.getSource().sendFailure(Component.literal(
-                                    "You must be looking at a block, or specify coordinates!"));
+                                    "You must be looking at a block within 50 blocks, or specify coordinates!"));
                             return 0;
                         }
 
@@ -221,30 +232,22 @@ public class Slimestone implements ModInitializer {
                             )
                     )
 
-                    // /slimestone rotationcheck -> show whether rotation checking is enabled.
-                    // /slimestone rotationcheck <true|false> -> toggle all rotated checks.
+                    // /slimestone rotationcheck -> show current rotation check mode.
+                    // /slimestone rotationcheck all|180|off selects a mode.
                     .then(Commands.literal("rotationcheck")
                             .executes(context -> {
                                 ServerPlayer player = context.getSource().getPlayerOrException();
                                 player.sendSystemMessage(Component.literal(
-                                        "§a[Slimestone] Rotation check: §f"
-                                                + (rotationCheckEnabled ? "ON" : "OFF")));
+                                        "§a[Slimestone] Rotation check mode: §f"
+                                                + getRotationCheckModeLabel()));
                                 return 1;
                             })
-                            .then(Commands.argument("enabled", BoolArgumentType.bool())
-                                    .executes(context -> {
-                                        ServerPlayer player = context.getSource().getPlayerOrException();
-                                        rotationCheckEnabled = BoolArgumentType.getBool(context, "enabled");
-                                        player.sendSystemMessage(Component.literal(
-                                                "§a[Slimestone] Rotation check: §f"
-                                                        + (rotationCheckEnabled ? "ON" : "OFF")));
-
-                                        if (trackingEnabled && trackedOrigin != null) {
-                                            pendingSimRun = true;
-                                        }
-                                        return 1;
-                                    })
-                            )
+                            .then(Commands.literal("all")
+                                    .executes(context -> setRotationCheckMode(context.getSource().getPlayerOrException(), RotationCheckMode.ALL)))
+                            .then(Commands.literal("180")
+                                    .executes(context -> setRotationCheckMode(context.getSource().getPlayerOrException(), RotationCheckMode.HALF_TURN)))
+                            .then(Commands.literal("off")
+                                    .executes(context -> setRotationCheckMode(context.getSource().getPlayerOrException(), RotationCheckMode.OFF)))
                     )
             );
 
@@ -346,14 +349,35 @@ public class Slimestone implements ModInitializer {
         });
     }
 
+    private int setRotationCheckMode(ServerPlayer player, RotationCheckMode mode) {
+        rotationCheckMode = mode;
+        player.sendSystemMessage(Component.literal("§a[Slimestone] Rotation check mode: §f"
+                + getRotationCheckModeLabel()));
+        if (trackingEnabled && trackedOrigin != null) {
+            pendingSimRun = true;
+        }
+        return 1;
+    }
+
+    private static String getRotationCheckModeLabel() {
+        return switch (rotationCheckMode) {
+            case OFF -> "OFF";
+            case ALL -> "ALL (90°, 180°, 270°)";
+            case HALF_TURN -> "180° only";
+        };
+    }
+
     private void startTracking(ServerPlayer player, BlockPos origin) {
+        boolean wasTracking = trackingEnabled;
         trackedPlayer = player;
         trackedOrigin = origin.immutable();
         trackingEnabled = true;
+        pendingSimRun = false;
         poiModeActive = false;
 
         player.sendSystemMessage(Component.literal(
-                "§a[Slimestone] Tracking enabled at " + trackedOrigin.toShortString()));
+                "§a[Slimestone] " + (wasTracking ? "Simulation point moved to " : "Tracking enabled at ")
+                        + trackedOrigin.toShortString()));
 
         runSimulation(player, trackedOrigin);
     }
@@ -542,45 +566,32 @@ public class Slimestone implements ModInitializer {
             }
         }
 
-        // ── Silent rotated pass ──────────────────────────────────────────────
-        // Runs the exact same contraption turned 90° (positions AND directional
-        // block properties, e.g. piston/observer FACING - see
-        // VirtualLevel#rotateRegion) around targetPos, purely to compare which
-        // blocks move and which remain stationary against the real-orientation
-        // run below. Nothing from the rotated passes is
+        // ── Silent rotated passes ────────────────────────────────────────────
+        // Rotate the same contraption (positions AND directional block
+        // properties, e.g. piston/observer FACING) around targetPos to compare
+        // its behavior with the real-orientation run below. Nothing from the rotated passes is
         // ever rendered - a rotated position usually isn't even a real block
         // the player can see - so it must not call render(), and its debugger
         // side effects (PistonDebugger/ObserverDebugger/MovingBlockDebugger
         // "expected" logs) are wiped by the resetExpected() calls below before
         // the real pass runs, so nothing from this rotated pass leaks into
         // /slimestone compare.
-        VirtualLevel rotatedLevel = rotationCheckEnabled
-                ? simulateRotatedRegion(player, regionSnapshot, targetPos, Rotation.CLOCKWISE_90)
-                : null;
-
         List<Map<BlockPos, Character>> rotatedClassifications = new ArrayList<>();
         List<Map<BlockPos, List<VirtualLevel.PistonActivation>>> rotatedPistonActivations = new ArrayList<>();
         List<Map<BlockPos, List<VirtualLevel.ObserverAction>>> rotatedObserverActions = new ArrayList<>();
-        if (rotationCheckEnabled) {
+        List<Rotation> rotationsToCheck = switch (rotationCheckMode) {
+            case OFF -> List.of();
+            case HALF_TURN -> List.of(Rotation.CLOCKWISE_180);
+            case ALL -> List.of(Rotation.CLOCKWISE_90, Rotation.CLOCKWISE_180, Rotation.COUNTERCLOCKWISE_90);
+        };
+        for (Rotation rotation : rotationsToCheck) {
+            VirtualLevel rotatedLevel = simulateRotatedRegion(player, regionSnapshot, targetPos, rotation);
             rotatedClassifications.add(mapRotatedClassificationsToOriginal(
-                    rotatedLevel.getMovementClassifications(), targetPos, Rotation.CLOCKWISE_90));
+                    rotatedLevel.getMovementClassifications(), targetPos, rotation));
             rotatedPistonActivations.add(mapRotatedPistonsToOriginal(
-                    rotatedLevel.getPistonActivations(), targetPos, Rotation.CLOCKWISE_90));
+                    rotatedLevel.getPistonActivations(), targetPos, rotation));
             rotatedObserverActions.add(mapRotatedPistonsToOriginal(
-                    rotatedLevel.getObserverActions(), targetPos, Rotation.CLOCKWISE_90));
-
-            // Reuse the existing 90-degree pass and run the other orientations
-            // only while rotation checking is enabled.
-            for (Rotation rotation : List.of(Rotation.CLOCKWISE_180, Rotation.COUNTERCLOCKWISE_90)) {
-                VirtualLevel otherRotatedLevel = simulateRotatedRegion(
-                        player, regionSnapshot, targetPos, rotation);
-                rotatedClassifications.add(mapRotatedClassificationsToOriginal(
-                        otherRotatedLevel.getMovementClassifications(), targetPos, rotation));
-                rotatedPistonActivations.add(mapRotatedPistonsToOriginal(
-                        otherRotatedLevel.getPistonActivations(), targetPos, rotation));
-                rotatedObserverActions.add(mapRotatedPistonsToOriginal(
-                        otherRotatedLevel.getObserverActions(), targetPos, rotation));
-            }
+                    rotatedLevel.getObserverActions(), targetPos, rotation));
         }
 
         // ── Real-orientation pass ────────────────────────────────────────────
@@ -607,7 +618,7 @@ public class Slimestone implements ModInitializer {
         Map<BlockPos, Set<Integer>> pistonOrderConflicts = new HashMap<>();
         Set<BlockPos> observerRotationConflicts = new HashSet<>();
         Map<BlockPos, Set<Integer>> observerOrderConflicts = new HashMap<>();
-        if (rotationCheckEnabled) {
+        if (rotationCheckMode != RotationCheckMode.OFF) {
             Map<BlockPos, List<VirtualLevel.PistonActivation>> originalActivations = level.getPistonActivations();
             for (Map.Entry<BlockPos, List<VirtualLevel.PistonActivation>> piston : originalActivations.entrySet()) {
                 boolean fullConflict = false;
@@ -818,7 +829,7 @@ public class Slimestone implements ModInitializer {
     }
 
     private BlockPos getTargetBlock(ServerPlayer player) {
-        double distance = 10.0;
+        double distance = 50.0;
         Vec3 eyePos = player.getEyePosition();
         Vec3 lookVec = player.getViewVector(1.0f);
         Vec3 endPos = eyePos.add(lookVec.x * distance, lookVec.y * distance, lookVec.z * distance);
@@ -828,6 +839,21 @@ public class Slimestone implements ModInitializer {
         BlockHitResult hit = player.level().clip(ctx);
 
         return hit.getType() == HitResult.Type.BLOCK ? hit.getBlockPos() : null;
+    }
+
+    private static boolean isRedstoneComponent(BlockState state) {
+        return state.isSignalSource()
+                || state.hasAnalogOutputSignal()
+                || state.getBlock() instanceof PistonBaseBlock
+                || state.getBlock() instanceof TrapDoorBlock
+                || state.getBlock() instanceof FenceGateBlock
+                || state.getBlock() instanceof DoorBlock
+                || state.is(Blocks.OBSERVER)
+                || state.is(Blocks.REDSTONE_LAMP)
+                || state.is(Blocks.DISPENSER)
+                || state.is(Blocks.DROPPER)
+                || state.is(Blocks.HOPPER)
+                || state.is(Blocks.TNT);
     }
 
     private void spawnNumberDisplay(ServerPlayer player, BlockPos targetPos) {
