@@ -55,6 +55,7 @@ public class MovingBlockDebugger {
         actual.clear();
         recordState   = RecordState.IDLE;
         realStartTick = -1;
+        trackedPlayer = null;
     }
 
     public static void logReal(BlockPos pos, BlockState state, boolean extending, long currentServerTick) {

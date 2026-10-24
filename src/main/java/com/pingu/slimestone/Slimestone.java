@@ -4,7 +4,9 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.coordinates.BlockPosArgument;
 import net.minecraft.core.BlockPos;
@@ -44,6 +46,7 @@ public class Slimestone implements ModInitializer {
     private static boolean trackingEnabled = false;
     private static BlockPos trackedOrigin = null;
     private static ServerPlayer trackedPlayer = null;
+    private static final List<BlockPos> startingInputs = new ArrayList<>();
 
     // Set whenever a placement/break reports a world change. The actual
     // re-simulation is deferred until the real world stops doing anything
@@ -94,6 +97,22 @@ public class Slimestone implements ModInitializer {
             }
         });
 
+        // Integrated servers stop whenever the player leaves a singleplayer
+        // world. Clear every session reference before the next world loads.
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> resetServerSession(trackedPlayer));
+
+        // A multiplayer server stays running after a player leaves, so also
+        // clean up when the player who owns the active simulation disconnects.
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
+            ServerPlayer disconnectingPlayer = handler.getPlayer();
+            if (disconnectingPlayer == trackedPlayer
+                    || disconnectingPlayer == ObserverDebugger.trackedPlayer
+                    || disconnectingPlayer == PistonDebugger.trackedPlayer
+                    || disconnectingPlayer == MovingBlockDebugger.trackedPlayer) {
+                resetServerSession(disconnectingPlayer);
+            }
+        });
+
         // Re-run when a block is removed
         PlayerBlockBreakEvents.AFTER.register((level, player, pos, state, blockEntity) -> {
             if (trackingEnabled) {
@@ -141,6 +160,42 @@ public class Slimestone implements ModInitializer {
                                 startTracking(player, target);
                                 return 1;
                             })
+                    )
+
+                    // /slimestone add [pos] -> add an input from the raycast or explicit coordinates.
+                    .then(Commands.literal("add")
+                            .executes(context -> {
+                                ServerPlayer player = context.getSource().getPlayerOrException();
+                                return addStartingInput(player, getTargetBlock(player));
+                            })
+                            .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                                    .executes(context -> {
+                                        ServerPlayer player = context.getSource().getPlayerOrException();
+                                        return addStartingInput(player,
+                                                BlockPosArgument.getLoadedBlockPos(context, "pos"));
+                                    })
+                            )
+                    )
+
+                    // /slimestone remove [pos] -> remove a raycast or explicit input position.
+                    .then(Commands.literal("remove")
+                            .executes(context -> {
+                                ServerPlayer player = context.getSource().getPlayerOrException();
+                                return removeStartingInput(player, getTargetBlock(player));
+                            })
+                            .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                                    .executes(context -> {
+                                        ServerPlayer player = context.getSource().getPlayerOrException();
+                                        return removeStartingInput(player,
+                                                BlockPosArgument.getLoadedBlockPos(context, "pos"));
+                                    })
+                            )
+                    )
+
+                    // Internal command used by the client-side F14 keybind.
+                    .then(Commands.literal("cycle")
+                            .executes(context -> cycleStartingInput(
+                                    context.getSource().getPlayerOrException()))
                     )
 
                     .then(Commands.literal("text1")
@@ -367,6 +422,84 @@ public class Slimestone implements ModInitializer {
         };
     }
 
+    private int addStartingInput(ServerPlayer player, BlockPos target) {
+        if (target == null) {
+            player.sendSystemMessage(Component.literal(
+                    "§c[Slimestone] Look at a block within 50 blocks or provide coordinates."));
+            return 0;
+        }
+
+        BlockPos input = target.immutable();
+        if (startingInputs.contains(input)) {
+            player.sendSystemMessage(Component.literal(
+                    "§e[Slimestone] Starting input already exists at " + input.toShortString()));
+            return 0;
+        }
+
+        startingInputs.add(input);
+        player.sendSystemMessage(Component.literal(
+                "§a[Slimestone] Added starting input §f" + startingInputs.size()
+                        + "§a at " + input.toShortString()));
+
+        if (!trackingEnabled) {
+            startTracking(player, startingInputs.getFirst());
+            sendStartingInputSelection(player, 0);
+        }
+        return 1;
+    }
+
+    private int removeStartingInput(ServerPlayer player, BlockPos target) {
+        if (target == null) {
+            player.sendSystemMessage(Component.literal(
+                    "§c[Slimestone] Look at a block within 50 blocks or provide coordinates."));
+            return 0;
+        }
+
+        BlockPos input = target.immutable();
+        int removedIndex = startingInputs.indexOf(input);
+        if (removedIndex < 0) {
+            player.sendSystemMessage(Component.literal(
+                    "§e[Slimestone] No starting input at " + input.toShortString()));
+            return 0;
+        }
+
+        startingInputs.remove(removedIndex);
+        player.sendSystemMessage(Component.literal(
+                "§a[Slimestone] Removed starting input at " + input.toShortString()
+                        + " (§f" + startingInputs.size() + "§a remaining)."));
+
+        if (trackingEnabled && input.equals(trackedOrigin)) {
+            if (startingInputs.isEmpty()) {
+                stopTracking(player);
+            } else {
+                int nextIndex = Math.min(removedIndex, startingInputs.size() - 1);
+                startTracking(player, startingInputs.get(nextIndex));
+                sendStartingInputSelection(player, nextIndex);
+            }
+        }
+        return 1;
+    }
+
+    private int cycleStartingInput(ServerPlayer player) {
+        if (startingInputs.isEmpty()) {
+            player.sendSystemMessage(Component.literal(
+                    "§c[Slimestone] No starting inputs. Add one with §f/slimestone add§c."));
+            return 0;
+        }
+
+        int currentIndex = startingInputs.indexOf(trackedOrigin);
+        int nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % startingInputs.size();
+        startTracking(player, startingInputs.get(nextIndex));
+        sendStartingInputSelection(player, nextIndex);
+        return 1;
+    }
+
+    private void sendStartingInputSelection(ServerPlayer player, int selectedIndex) {
+        player.sendSystemMessage(Component.literal(
+                "§a[Slimestone] Starting input §f" + (selectedIndex + 1) + "/" + startingInputs.size()
+                        + "§a selected."));
+    }
+
     private void startTracking(ServerPlayer player, BlockPos origin) {
         boolean wasTracking = trackingEnabled;
         trackedPlayer = player;
@@ -392,6 +525,28 @@ public class Slimestone implements ModInitializer {
         killAllDisplayEntities(player);
 
         player.sendSystemMessage(Component.literal("§e[Slimestone] Tracking disabled."));
+    }
+
+    private void resetServerSession(ServerPlayer displayOwner) {
+        // Remove simulation displays while the departing player's world is
+        // still available. Suppressed command output avoids sending packets to
+        // a connection that is already disconnecting.
+        if (displayOwner != null) {
+            killAllDisplayEntities(displayOwner);
+        }
+
+        trackingEnabled = false;
+        trackedOrigin = null;
+        trackedPlayer = null;
+        pendingSimRun = false;
+        poiModeActive = false;
+        startingInputs.clear();
+        lastSimLevel = null;
+        lastPoiGt = 0;
+
+        ObserverDebugger.fullReset(null);
+        PistonDebugger.fullReset(null);
+        MovingBlockDebugger.fullReset(null);
     }
 
     // Kills every display entity type (text, block, and item displays), not

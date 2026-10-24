@@ -52,6 +52,7 @@ public class PistonDebugger {
         actual.clear();
         recordState   = RecordState.IDLE;
         realStartTick = -1;
+        trackedPlayer = null;
         if (player != null) {
             // Optional: comment out if you don't want double-messages with ObserverDebugger
             // player.sendSystemMessage(Component.literal("§7[Slimestone] Piston Debugger reset."));

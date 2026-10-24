@@ -90,6 +90,7 @@ public class ObserverDebugger {
         actual.clear();
         recordState   = RecordState.IDLE;
         realStartTick = -1;
+        trackedPlayer = null;
         if (player != null) {
             player.sendSystemMessage(Component.literal("§7[Slimestone] Debugger reset."));
         }
